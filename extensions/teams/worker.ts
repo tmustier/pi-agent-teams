@@ -1,5 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import { randomUUID } from "node:crypto";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
 import { getTeamDir } from "./paths.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
@@ -67,7 +69,10 @@ function extractLastAssistantText(messages: AgentMessage[]): string {
 	return "";
 }
 
-function buildTaskPrompt(agentName: string, task: TeamTask): string {
+function buildTaskPrompt(agentName: string, task: TeamTask, planOnly = false): string {
+	const footer = planOnly
+		? "Produce a detailed implementation plan only. Do NOT make any changes or implement anything yet. Your plan will be reviewed before you can proceed."
+		: "Do the work now. When finished, reply with a concise summary and any key outputs.";
 	return [
 		`You are teammate '${agentName}'.`,
 		`You have been assigned task #${task.id}.`,
@@ -75,7 +80,7 @@ function buildTaskPrompt(agentName: string, task: TeamTask): string {
 		"",
 		`Description:\n${task.description}`,
 		"",
-		"Do the work now. When finished, reply with a concise summary and any key outputs.",
+		footer,
 	].join("\n");
 }
 
@@ -145,9 +150,80 @@ function isAbortRequestMessage(
 	}
 }
 
+function isPlanApprovedMessage(text: string): { requestId: string; from: string; timestamp: string } | null {
+	try {
+		const obj = JSON.parse(text);
+		if (!obj || typeof obj !== "object") return null;
+		if (obj.type !== "plan_approved") return null;
+		if (typeof obj.requestId !== "string" || typeof obj.from !== "string") return null;
+		return {
+			requestId: obj.requestId,
+			from: obj.from,
+			timestamp: typeof obj.timestamp === "string" ? obj.timestamp : "",
+		};
+	} catch {
+		return null;
+	}
+}
+
+function isPlanRejectedMessage(
+	text: string,
+): { requestId: string; from: string; feedback: string; timestamp: string } | null {
+	try {
+		const obj = JSON.parse(text);
+		if (!obj || typeof obj !== "object") return null;
+		if (obj.type !== "plan_rejected") return null;
+		if (typeof obj.requestId !== "string" || typeof obj.from !== "string") return null;
+		return {
+			requestId: obj.requestId,
+			from: obj.from,
+			feedback: typeof obj.feedback === "string" ? obj.feedback : "",
+			timestamp: typeof obj.timestamp === "string" ? obj.timestamp : "",
+		};
+	} catch {
+		return null;
+	}
+}
+
 export function runWorker(pi: ExtensionAPI): void {
 	const env = teamDirFromEnv();
 	if (!env) return;
+
+	const { teamId, teamDir, taskListId, agentName, leadName, autoClaim } = env;
+
+	pi.registerTool({
+		name: "team_message",
+		label: "Team Message",
+		description: "Send a message to a teammate. Use this to coordinate with peers on related tasks.",
+		parameters: Type.Object({
+			recipient: Type.String({ description: "Name of the teammate to message" }),
+			message: Type.String({ description: "The message to send" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const recipient = sanitize((params as any).recipient);
+			const message = (params as any).message as string;
+			const ts = new Date().toISOString();
+			// Write to recipient's mailbox in team namespace
+			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, recipient, {
+				from: agentName,
+				text: message,
+				timestamp: ts,
+			});
+			// CC leader with peer_dm_sent notification
+			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
+				from: agentName,
+				text: JSON.stringify({
+					type: "peer_dm_sent",
+					from: agentName,
+					to: recipient,
+					summary: message.slice(0, 100),
+					timestamp: ts,
+				}),
+				timestamp: ts,
+			});
+			return { content: [{ type: "text", text: `Message sent to ${recipient}` }] };
+		},
+	});
 
 	let ctxRef: ExtensionContext | null = null;
 	let isStreaming = false;
@@ -164,7 +240,12 @@ export function runWorker(pi: ExtensionAPI): void {
 	let abortRequestId: string | null = null;
 	const seenAbortRequestIds = new Set<string>();
 
-	const { teamId, teamDir, taskListId, agentName, leadName, autoClaim } = env;
+	// Plan-required mode
+	let planMode = process.env.PI_TEAMS_PLAN_REQUIRED === "1";
+	let planApproved = false;
+	let planRequestId: string | null = null;
+	/** Tools that were active before plan-mode restriction, so we can restore them on approval. */
+	let prePlanTools: string[] | null = null;
 
 	const poll = async () => {
 		while (!pollAbort) {
@@ -181,10 +262,29 @@ export function runWorker(pi: ExtensionAPI): void {
 					const shutdown = isShutdownRequestMessage(m.text);
 					if (shutdown && !seenShutdownRequestIds.has(shutdown.requestId)) {
 						seenShutdownRequestIds.add(shutdown.requestId);
+
+						const ts = new Date().toISOString();
+
+						// Reject shutdown if currently busy (including plan-mode waiting for approval)
+						if (currentTaskId) {
+							await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
+								from: agentName,
+								text: JSON.stringify({
+									type: "shutdown_rejected",
+									requestId: shutdown.requestId,
+									from: agentName,
+									reason: `Currently working on task #${currentTaskId}`,
+									timestamp: ts,
+								}),
+								timestamp: ts,
+							});
+							continue;
+						}
+
+						// Idle — approve shutdown
 						shutdownInProgress = true;
 						pollAbort = true;
 
-						const ts = new Date().toISOString();
 						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
 							from: agentName,
 							text: JSON.stringify({
@@ -253,6 +353,27 @@ export function runWorker(pi: ExtensionAPI): void {
 						continue;
 					}
 
+					// Plan approval/rejection handling
+					const planApproval = isPlanApprovedMessage(m.text);
+					if (planApproval && planRequestId && planApproval.requestId === planRequestId) {
+						pi.setActiveTools(prePlanTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+						prePlanTools = null;
+						planApproved = true;
+						planMode = false;
+						planRequestId = null;
+						pi.sendUserMessage("Your plan has been approved. Proceed with implementation.");
+						continue;
+					}
+
+					const planRejection = isPlanRejectedMessage(m.text);
+					if (planRejection && planRequestId && planRejection.requestId === planRequestId) {
+						planRequestId = null;
+						pi.sendUserMessage(
+							`Your plan was rejected. Feedback: ${planRejection.feedback}\nPlease revise your plan.`,
+						);
+						continue;
+					}
+
 					const assign = isTaskAssignmentMessage(m.text);
 					if (assign) {
 						pendingTaskAssignments.push(assign.taskId);
@@ -300,7 +421,7 @@ export function runWorker(pi: ExtensionAPI): void {
 
 				currentTaskId = taskId;
 				isStreaming = true; // optimistic; agent_start will follow
-				pi.sendUserMessage(buildTaskPrompt(agentName, task));
+				pi.sendUserMessage(buildTaskPrompt(agentName, task, planMode && !planApproved));
 				pendingTaskAssignments = [...requeue, ...pendingTaskAssignments];
 				return;
 			}
@@ -324,7 +445,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				if (claimed) {
 					currentTaskId = claimed.id;
 					isStreaming = true;
-					pi.sendUserMessage(buildTaskPrompt(agentName, claimed));
+					pi.sendUserMessage(buildTaskPrompt(agentName, claimed, planMode && !planApproved));
 					return;
 				}
 			}
@@ -365,6 +486,11 @@ export function runWorker(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		ctxRef = ctx;
 
+		// Restrict tools in plan-required mode (read-only until plan is approved)
+		if (planMode) {
+			prePlanTools = pi.getActiveTools?.() ?? ["read", "bash", "edit", "write", "grep", "find", "ls"];
+			pi.setActiveTools(["read", "grep", "find", "ls"]);
+		}
 
 		// Register ourselves in the shared team config so manual tmux workers are discoverable.
 		try {
@@ -411,6 +537,30 @@ export function runWorker(pi: ExtensionAPI): void {
 
 	pi.on("agent_end", async (event) => {
 		isStreaming = false;
+
+		// Plan submission: if in plan mode and not yet approved, send plan to leader for review
+		// Only do this when we're working on a task and haven't already requested approval.
+		if (planMode && !planApproved && currentTaskId && !planRequestId) {
+			const lastAssistantText = extractLastAssistantText(event.messages as AgentMessage[]);
+			const reqId = randomUUID();
+			planRequestId = reqId;
+			const timestamp = new Date().toISOString();
+			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
+				from: agentName,
+				text: JSON.stringify({
+					type: "plan_approval_request",
+					requestId: reqId,
+					from: agentName,
+					plan: lastAssistantText,
+					taskId: currentTaskId ?? undefined,
+					timestamp,
+				}),
+				timestamp,
+			});
+			// Do NOT clear currentTaskId, do NOT complete the task, do NOT send idle notification
+			return;
+		}
+
 		const taskId = currentTaskId;
 		currentTaskId = null;
 

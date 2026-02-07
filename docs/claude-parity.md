@@ -34,15 +34,15 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Self-claim | Teammates can self-claim next unassigned, unblocked task; file locking | ✅ | Implemented: `claimNextAvailableTask()` + locks; enabled by default (`PI_TEAMS_DEFAULT_AUTO_CLAIM=1`). | P0 |
 | Explicit assign | Lead assigns task to teammate | ✅ | `/team task assign` sets owner + pings via mailbox. | P0 |
 | “Message” vs “broadcast” | Send to one teammate or all teammates | ✅ | `/team dm` + `/team broadcast` use mailbox; `/team send` uses RPC. Broadcast recipients = team config workers + RPC-spawned map + active task owners; manual tmux workers self-register into `config.json` on startup. | P0 |
-| Teammate↔teammate messaging | Teammates can message each other directly | ❌ | Worker needs peer discovery (read team config) + send command/tool. | P1 |
+| Teammate↔teammate messaging | Teammates can message each other directly | ✅ | Workers register `team_message` LLM-callable tool; sends via mailbox + CC's leader with `peer_dm_sent` notification. | P1 |
 | Display modes | In-process selection (Shift+Up/Down); split panes (tmux/iTerm) | ❌ | Pi has a widget + commands, but no terminal-level teammate navigation/panes. | P2 |
-| Delegate mode | Lead restricted to coordination-only tools | ❌ | Add a leader “delegate mode” switch that blocks edit/write/bash tools (soft or enforced). | P1 |
-| Plan approval | Teammate can be “plan required” and needs lead approval to implement | ❌ | Likely implement by spawning with read-only tool set until approved, then restart worker with full tools. | P1 |
-| Shutdown handshake | Lead requests shutdown; teammate can approve/reject | 🟡 | Implemented `shutdown_request` → `shutdown_approved` via mailbox + `/team shutdown <name>` (auto-approve; no reject yet). | P1 |
+| Delegate mode | Lead restricted to coordination-only tools | ✅ | `/team delegate [on|off]` toggles; `pi.on("tool_call")` blocks `bash/edit/write`; `PI_TEAMS_DELEGATE_MODE=1` env. Widget shows `[delegate]`. | P1 |
+| Plan approval | Teammate can be "plan required" and needs lead approval to implement | ✅ | `/team spawn <name> plan` sets `PI_TEAMS_PLAN_REQUIRED=1`; worker restricted to read-only tools; submits plan via `plan_approval_request`; `/team plan approve|reject <name>`. | P1 |
+| Shutdown handshake | Lead requests shutdown; teammate can approve/reject | ✅ | Full protocol: `shutdown_request` → `shutdown_approved` or `shutdown_rejected` (when worker is busy). `/team shutdown <name>` (graceful) + `/team kill` (force). | P1 |
 | Cleanup team | “Clean up the team” removes shared resources after teammates stopped | ✅ | `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks. | P1 |
 | Hooks / quality gates | `TeammateIdle`, `TaskCompleted` hooks | ❌ | Add optional hook runner in leader on idle/task-complete events (script execution + exit-code gating). | P2 |
 | Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` show blocked/deps; `/team task show <id>`; `/team task clear [completed|all]`. No Ctrl+T toggle yet. | P0 |
-| Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | 🟡 | Pi supports `PI_TEAMS_TASK_LIST_ID` env (worker side) but leader doesn’t expose a stable “named task list id” workflow yet. | P1 |
+| Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | ✅ | `PI_TEAMS_TASK_LIST_ID` env on leader + worker; `/team task use <taskListId>` switches the leader (and newly spawned workers). Existing workers need a restart to pick up changes. Persisted in config.json. | P1 |
 
 ## Prioritized roadmap
 
@@ -59,37 +59,50 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 3) **Task list hygiene** ✅
    - `/team task clear [completed|all] [--force]` (safe delete within `teamsRoot/teamId`)
 
-### P1: governance + lifecycle parity
+### P1 (done): governance + lifecycle parity
 
-4) **Shutdown handshake** 🟡
-   - Mailbox protocol: `shutdown_request` → `shutdown_approved` (no reject yet)
-   - Leader command: `/team shutdown <name> [reason...]` (graceful), keep `/team kill` as force
+4) **Shutdown handshake** ✅
+   - Full protocol: `shutdown_request` → `shutdown_approved` / `shutdown_rejected`
+   - Worker rejects when busy (streaming + active task), auto-approves when idle
+   - Leader command: `/team shutdown <name> [reason...]` (graceful), `/team kill` as force
 
-5) **Plan approval**
-   - Spawn option: `--plan-required` / `/team spawn <name> plan` (naming TBD)
-   - Worker flow: produce plan → send approval request → wait → implement after approval
-   - Enforcement idea: start worker with tools excluding write/edit/bash, then restart same session with full tool set after approval
+5) **Plan approval** ✅
+   - `/team spawn <name> [fresh|branch] [shared|worktree] plan` sets `PI_TEAMS_PLAN_REQUIRED=1`
+   - Worker starts with read-only tools (`read`, `grep`, `find`, `ls`)
+   - After first `agent_end`, sends `plan_approval_request` to leader via mailbox
+   - `/team plan approve <name>` → worker gets full tools and proceeds
+   - `/team plan reject <name> [feedback...]` → worker revises plan (stays read-only)
 
-6) **Delegate mode (leader)**
-   - A toggle (env or command) that prevents the leader from doing code edits and focuses it on coordination.
-   - In Pi, likely implemented as: leader tool wrapper refuses `bash/edit/write` while delegate mode is on.
+6) **Delegate mode (leader)** ✅
+   - `/team delegate [on|off]` toggle (or `PI_TEAMS_DELEGATE_MODE=1` env)
+   - `tool_call` hook blocks `bash`, `edit`, `write` when active
+   - Widget shows `[delegate]` indicator
 
 7) **Cleanup** ✅
    - `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks.
    - Refuses if RPC teammates are running or there are `in_progress` tasks unless `--force`.
 
+8) **Peer-to-peer messaging** ✅
+   - Workers register `team_message` LLM-callable tool (recipient + message params)
+   - Messages go via mailbox in `team` namespace; leader CC'd with `peer_dm_sent` notification
+
+9) **Shared task list across sessions** ✅
+   - `PI_TEAMS_TASK_LIST_ID` env on leader + worker sides
+   - `/team task use <taskListId>` switches the leader (and newly spawned workers); restart existing workers to pick up changes
+   - Task list ID persisted in team config
+
 ### P2: UX + “product-level” parity
 
-8) **Better teammate interaction UX**
+10) **Better teammate interaction UX**
    - Explore whether Pi’s TUI API can support:
      - selecting a teammate from the widget
      - “entering” a teammate transcript view
    - (Optional) tmux integration for split panes.
 
-9) **Hooks / quality gates**
+11) **Hooks / quality gates**
    - Support scripts that run on idle/task completion (similar to Claude hooks).
 
-10) **Join/attach flow**
+12) **Join/attach flow**
    - Allow a running session to attach to an existing team (discover + approve join).
 
 ## Where changes would land (code map)

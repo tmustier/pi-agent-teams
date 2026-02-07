@@ -221,16 +221,97 @@ function isShutdownApproved(
 	}
 }
 
+function isShutdownRejected(
+	text: string,
+): {
+	from: string;
+	requestId: string;
+	reason: string;
+	timestamp?: string;
+} | null {
+	try {
+		const obj = JSON.parse(text);
+		if (!obj || typeof obj !== "object") return null;
+		if (obj.type !== "shutdown_rejected") return null;
+		if (typeof obj.requestId !== "string") return null;
+		return {
+			from: typeof obj.from === "string" ? obj.from : "unknown",
+			requestId: obj.requestId,
+			reason: typeof obj.reason === "string" ? obj.reason : "",
+			timestamp: typeof obj.timestamp === "string" ? obj.timestamp : undefined,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function isPlanApprovalRequest(
+	text: string,
+): {
+	requestId: string;
+	from: string;
+	plan: string;
+	taskId?: string;
+	timestamp?: string;
+} | null {
+	try {
+		const obj = JSON.parse(text);
+		if (!obj || typeof obj !== "object") return null;
+		if (obj.type !== "plan_approval_request") return null;
+		if (typeof obj.requestId !== "string") return null;
+		if (typeof obj.from !== "string") return null;
+		if (typeof obj.plan !== "string") return null;
+		return {
+			requestId: obj.requestId,
+			from: obj.from,
+			plan: obj.plan,
+			taskId: typeof obj.taskId === "string" ? obj.taskId : undefined,
+			timestamp: typeof obj.timestamp === "string" ? obj.timestamp : undefined,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function isPeerDmSent(
+	text: string,
+): {
+	from: string;
+	to: string;
+	summary: string;
+	timestamp?: string;
+} | null {
+	try {
+		const obj = JSON.parse(text);
+		if (!obj || typeof obj !== "object") return null;
+		if (obj.type !== "peer_dm_sent") return null;
+		if (typeof obj.from !== "string") return null;
+		if (typeof obj.to !== "string") return null;
+		if (typeof obj.summary !== "string") return null;
+		return {
+			from: obj.from,
+			to: obj.to,
+			summary: obj.summary,
+			timestamp: typeof obj.timestamp === "string" ? obj.timestamp : undefined,
+		};
+	} catch {
+		return null;
+	}
+}
+
 export function runLeader(pi: ExtensionAPI): void {
 	const teammates = new Map<string, TeammateRpc>();
 	let currentCtx: ExtensionCommandContext | null = null;
 	let currentTeamId: string | null = null;
 	let tasks: TeamTask[] = [];
 	let teamConfig: TeamConfig | null = null;
+	const pendingPlanApprovals = new Map<string, { requestId: string; name: string; taskId?: string }>();
+	let taskListId: string | null = process.env.PI_TEAMS_TASK_LIST_ID ?? null;
 
 	let refreshTimer: NodeJS.Timeout | null = null;
 	let inboxTimer: NodeJS.Timeout | null = null;
 	let isStopping = false;
+	let delegateMode = process.env.PI_TEAMS_DELEGATE_MODE === "1";
 
 	const stopLoops = () => {
 		if (refreshTimer) clearInterval(refreshTimer);
@@ -248,7 +329,8 @@ export function runLeader(pi: ExtensionAPI): void {
 				// Claude-style: unassign non-completed tasks on exit.
 				const teamId = ctx.sessionManager.getSessionId();
 				const teamDir = getTeamDir(teamId);
-				await unassignTasksForAgent(teamDir, teamId, name, reason);
+				const effectiveTlId = taskListId ?? teamId;
+				await unassignTasksForAgent(teamDir, effectiveTlId, name, reason);
 				await setMemberStatus(teamDir, name, "offline", { meta: { stoppedReason: reason } });
 			}
 			teammates.clear();
@@ -260,22 +342,33 @@ export function runLeader(pi: ExtensionAPI): void {
 	const refreshTasks = async () => {
 		if (!currentCtx || !currentTeamId) return;
 		const teamDir = getTeamDir(currentTeamId);
+		const effectiveTaskListId = taskListId ?? currentTeamId;
 
-		const [nextTasks, cfg] = await Promise.all([listTasks(teamDir, currentTeamId), loadTeamConfig(teamDir)]);
+		const [nextTasks, cfg] = await Promise.all([listTasks(teamDir, effectiveTaskListId), loadTeamConfig(teamDir)]);
 		tasks = nextTasks;
 		teamConfig =
 			cfg ??
 			(await ensureTeamConfig(teamDir, {
 				teamId: currentTeamId,
-				taskListId: currentTeamId,
+				taskListId: effectiveTaskListId,
 				leadName: "team-lead",
 			}));
 	};
 
 	const renderWidget = () => {
 		if (!currentCtx || !currentTeamId) return;
+
+		// Hide the widget entirely when there is no active team state.
+		const hasOnlineMembers = (teamConfig?.members ?? []).some(
+			(m) => m.role === "worker" && m.status === "online",
+		);
+		if (teammates.size === 0 && tasks.length === 0 && !hasOnlineMembers) {
+			currentCtx.ui.setWidget("pi-teams", []);
+			return;
+		}
+
 		const lines: string[] = [];
-		lines.push("Teams");
+		lines.push(delegateMode ? "Teams [delegate]" : "Teams");
 
 		const c = countTasks(tasks);
 		lines.push(`  Tasks: pending ${c.pending} • in_progress ${c.in_progress} • completed ${c.completed}`);
@@ -340,7 +433,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	const spawnTeammate = async (
 		ctx: ExtensionContext,
-		opts: { name: string; mode?: ContextMode; workspaceMode?: WorkspaceMode },
+		opts: { name: string; mode?: ContextMode; workspaceMode?: WorkspaceMode; planRequired?: boolean },
 	): Promise<SpawnTeammateResult> => {
 		const warnings: string[] = [];
 		const mode: ContextMode = opts.mode ?? "fresh";
@@ -410,10 +503,11 @@ export function runLeader(pi: ExtensionAPI): void {
 				env: {
 					PI_TEAMS_WORKER: "1",
 					PI_TEAMS_TEAM_ID: teamId,
-					PI_TEAMS_TASK_LIST_ID: teamId,
+					PI_TEAMS_TASK_LIST_ID: taskListId ?? teamId,
 					PI_TEAMS_AGENT_NAME: name,
 					PI_TEAMS_LEAD_NAME: "team-lead",
 					PI_TEAMS_AUTO_CLAIM: autoClaim ? "1" : "0",
+					...(opts.planRequired ? { PI_TEAMS_PLAN_REQUIRED: "1" } : {}),
 				},
 				args: argsForChild,
 			});
@@ -443,7 +537,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			// ignore
 		}
 
-		await ensureTeamConfig(teamDir, { teamId, taskListId: teamId, leadName: "team-lead" });
+		await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "team-lead" });
 		await upsertMember(teamDir, {
 			name,
 			role: "worker",
@@ -471,7 +565,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				const name = sanitizeName(approved.from);
 				const cfg = await ensureTeamConfig(teamDir, {
 					teamId: currentTeamId,
-					taskListId: currentTeamId,
+					taskListId: taskListId ?? currentTeamId,
 					leadName: "team-lead",
 				});
 				if (!cfg.members.some((mm) => mm.name === name)) {
@@ -488,13 +582,46 @@ export function runLeader(pi: ExtensionAPI): void {
 				continue;
 			}
 
+			const rejected = isShutdownRejected(m.text);
+			if (rejected) {
+				const name = sanitizeName(rejected.from);
+				await setMemberStatus(teamDir, name, "online", {
+					lastSeenAt: rejected.timestamp,
+					meta: {
+						shutdownRejectedAt: rejected.timestamp ?? new Date().toISOString(),
+						shutdownRejectedReason: rejected.reason,
+					},
+				});
+				currentCtx.ui.notify(`${name} rejected shutdown: ${rejected.reason}`, "warning");
+				continue;
+			}
+
+			const planReq = isPlanApprovalRequest(m.text);
+			if (planReq) {
+				const name = sanitizeName(planReq.from);
+				const preview = planReq.plan.length > 500 ? planReq.plan.slice(0, 500) + "..." : planReq.plan;
+				currentCtx.ui.notify(`${name} requests plan approval:\n${preview}`, "info");
+				pendingPlanApprovals.set(name, {
+					requestId: planReq.requestId,
+					name,
+					taskId: planReq.taskId,
+				});
+				continue;
+			}
+
+			const peerDm = isPeerDmSent(m.text);
+			if (peerDm) {
+				currentCtx.ui.notify(`${peerDm.from} → ${peerDm.to}: ${peerDm.summary}`, "info");
+				continue;
+			}
+
 			const idle = isIdleNotification(m.text);
 			if (idle) {
 				const name = sanitizeName(idle.from);
 				if (idle.failureReason) {
 					const cfg = await ensureTeamConfig(teamDir, {
 						teamId: currentTeamId,
-						taskListId: currentTeamId,
+						taskListId: taskListId ?? currentTeamId,
 						leadName: "team-lead",
 					});
 					if (!cfg.members.some((mm) => mm.name === name)) {
@@ -510,7 +637,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 					const cfg = await ensureTeamConfig(teamDir, {
 						teamId: currentTeamId,
-						taskListId: currentTeamId,
+						taskListId: taskListId ?? currentTeamId,
 						leadName: "team-lead",
 					});
 
@@ -570,14 +697,23 @@ export function runLeader(pi: ExtensionAPI): void {
 		}
 	};
 
+	pi.on("tool_call", (event, _ctx) => {
+		if (!delegateMode) return;
+		const blockedTools = new Set(["bash", "edit", "write"]);
+		if (blockedTools.has(event.name)) {
+			return { block: true, reason: "Delegate mode is active — use teammates for implementation." };
+		}
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx as ExtensionCommandContext;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
+		if (!taskListId) taskListId = currentTeamId;
 
 		// Claude-style: a persisted team config file.
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
-			taskListId: currentTeamId,
+			taskListId: taskListId,
 			leadName: "team-lead",
 		});
 
@@ -605,10 +741,11 @@ export function runLeader(pi: ExtensionAPI): void {
 
 		currentCtx = ctx as ExtensionCommandContext;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
+		if (!taskListId) taskListId = currentTeamId;
 
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
-			taskListId: currentTeamId,
+			taskListId: taskListId,
 			leadName: "team-lead",
 		});
 
@@ -669,7 +806,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 			const teamId = ctx.sessionManager.getSessionId();
 			const teamDir = getTeamDir(teamId);
-			await ensureTeamConfig(teamDir, { teamId, taskListId: teamId, leadName: "team-lead" });
+			await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "team-lead" });
 
 			let teammateNames: string[] = [];
 			const explicit = (params as any).teammates;
@@ -743,9 +880,10 @@ export function runLeader(pi: ExtensionAPI): void {
 
 				const description = text;
 				const subject = description.split("\n")[0].slice(0, 120);
-				const task = await createTask(teamDir, teamId, { subject, description, owner: assignee });
+				const effectiveTlId = taskListId ?? teamId;
+				const task = await createTask(teamDir, effectiveTlId, { subject, description, owner: assignee });
 
-				await writeToMailbox(teamDir, teamId, assignee, {
+				await writeToMailbox(teamDir, effectiveTlId, assignee, {
 					from: "team-lead",
 					text: JSON.stringify(taskAssignmentPayload(task, "team-lead")),
 					timestamp: new Date().toISOString(),
@@ -796,7 +934,7 @@ export function runLeader(pi: ExtensionAPI): void {
 						"Usage:",
 						"  /team id",
 						"  /team env <name>",
-						"  /team spawn <name> [fresh|branch] [shared|worktree]",
+						"  /team spawn <name> [fresh|branch] [shared|worktree] [plan]",
 						"  /team send <name> <msg...>",
 						"  /team dm <name> <msg...>",
 						"  /team broadcast <msg...>",
@@ -805,6 +943,9 @@ export function runLeader(pi: ExtensionAPI): void {
 						"  /team kill <name>",
 						"  /team shutdown",
 						"  /team shutdown <name> [reason...]",
+						"  /team delegate [on|off]",
+						"  /team plan approve <name>",
+						"  /team plan reject <name> [feedback...]",
 						"  /team cleanup [--force]",
 						"  /team task add <text...>",
 						"  /team task assign <id> <agent>",
@@ -815,6 +956,7 @@ export function runLeader(pi: ExtensionAPI): void {
 						"  /team task dep add <id> <depId>",
 						"  /team task dep rm <id> <depId>",
 						"  /team task dep ls <id>",
+						"  /team task use <taskListId>",
 					].join("\n"),
 					"info",
 				);
@@ -855,7 +997,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 				case "id": {
 					const teamId = ctx.sessionManager.getSessionId();
-					const taskListId = teamId;
+					const effectiveTlId = taskListId ?? teamId;
 					const leadName = "team-lead";
 					const teamsRoot = getTeamsRootDir();
 					const teamDir = getTeamDir(teamId);
@@ -863,7 +1005,7 @@ export function runLeader(pi: ExtensionAPI): void {
 					ctx.ui.notify(
 						[
 							`teamId: ${teamId}`,
-							`taskListId: ${taskListId}`,
+							`taskListId: ${effectiveTlId}`,
 							`leadName: ${leadName}`,
 							`teamsRoot: ${teamsRoot}`,
 							`teamDir: ${teamDir}`,
@@ -882,7 +1024,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 					const name = sanitizeName(nameRaw);
 					const teamId = ctx.sessionManager.getSessionId();
-					const taskListId = teamId;
+					const effectiveTlId = taskListId ?? teamId;
 					const leadName = "team-lead";
 					const teamsRoot = getTeamsRootDir();
 					const teamDir = getTeamDir(teamId);
@@ -895,7 +1037,7 @@ export function runLeader(pi: ExtensionAPI): void {
 						PI_TEAMS_ROOT_DIR: teamsRoot,
 						PI_TEAMS_WORKER: "1",
 						PI_TEAMS_TEAM_ID: teamId,
-						PI_TEAMS_TASK_LIST_ID: taskListId,
+						PI_TEAMS_TASK_LIST_ID: effectiveTlId,
 						PI_TEAMS_AGENT_NAME: name,
 						PI_TEAMS_LEAD_NAME: leadName,
 						PI_TEAMS_AUTO_CLAIM: autoClaim,
@@ -913,7 +1055,7 @@ export function runLeader(pi: ExtensionAPI): void {
 					ctx.ui.notify(
 						[
 							`teamId: ${teamId}`,
-							`taskListId: ${taskListId}`,
+							`taskListId: ${effectiveTlId}`,
 							`leadName: ${leadName}`,
 							`teamsRoot: ${teamsRoot}`,
 							`teamDir: ${teamDir}`,
@@ -1000,6 +1142,16 @@ export function runLeader(pi: ExtensionAPI): void {
 					return;
 				}
 
+				case "delegate": {
+					const arg = rest[0];
+					if (arg === "on") delegateMode = true;
+					else if (arg === "off") delegateMode = false;
+					else delegateMode = !delegateMode;
+					ctx.ui.notify(`Delegate mode ${delegateMode ? "ON" : "OFF"}`, "info");
+					renderWidget();
+					return;
+				}
+
 				case "shutdown": {
 					const nameRaw = rest[0];
 
@@ -1077,22 +1229,23 @@ export function runLeader(pi: ExtensionAPI): void {
 
 				case "spawn": {
 					const nameRaw = rest[0];
-					const arg2 = rest[1] as string | undefined;
-					const arg3 = rest[2] as string | undefined;
+					const spawnArgs = rest.slice(1);
 
 					let mode: ContextMode = "fresh";
 					let workspaceMode: WorkspaceMode = "shared";
-					for (const a of [arg2, arg3]) {
+					let planRequired = false;
+					for (const a of spawnArgs) {
 						if (a === "fresh" || a === "branch") mode = a;
 						if (a === "shared" || a === "worktree") workspaceMode = a;
+						if (a === "plan") planRequired = true;
 					}
 
 					if (!nameRaw) {
-						ctx.ui.notify("Usage: /team spawn <name> [fresh|branch] [shared|worktree]", "error");
+						ctx.ui.notify("Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan]", "error");
 						return;
 					}
 
-					const res = await spawnTeammate(ctx, { name: nameRaw, mode, workspaceMode });
+					const res = await spawnTeammate(ctx, { name: nameRaw, mode, workspaceMode, planRequired });
 					if (!res.ok) {
 						ctx.ui.notify(res.error, "error");
 						return;
@@ -1208,7 +1361,8 @@ export function runLeader(pi: ExtensionAPI): void {
 
 					const teamId = ctx.sessionManager.getSessionId();
 					const teamDir = getTeamDir(teamId);
-					await unassignTasksForAgent(teamDir, teamId, name, `Killed teammate '${name}'`);
+					const effectiveTlId = taskListId ?? teamId;
+					await unassignTasksForAgent(teamDir, effectiveTlId, name, `Killed teammate '${name}'`);
 					await setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
 
 					ctx.ui.notify(`Killed teammate ${name}`, "warning");
@@ -1245,7 +1399,7 @@ export function runLeader(pi: ExtensionAPI): void {
 					const teamId = ctx.sessionManager.getSessionId();
 					const teamDir = getTeamDir(teamId);
 					const leadName = "team-lead";
-					const cfg = await ensureTeamConfig(teamDir, { teamId, taskListId: teamId, leadName });
+					const cfg = await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName });
 
 					const recipients = new Set<string>();
 					for (const m of cfg.members) {
@@ -1284,6 +1438,7 @@ export function runLeader(pi: ExtensionAPI): void {
 					const [taskSub, ...taskRest] = rest;
 					const teamId = ctx.sessionManager.getSessionId();
 					const teamDir = getTeamDir(teamId);
+					const effectiveTlId = taskListId ?? teamId;
 
 					if (!taskSub || taskSub === "help") {
 						ctx.ui.notify(
@@ -1298,6 +1453,7 @@ export function runLeader(pi: ExtensionAPI): void {
 								"  /team task dep add <id> <depId>",
 								"  /team task dep rm <id> <depId>",
 								"  /team task dep ls <id>",
+								"  /team task use <taskListId>",
 								"Tip: prefix with assignee, e.g. 'alice: review the API surface'",
 							].join("\n"),
 							"info",
@@ -1318,11 +1474,11 @@ export function runLeader(pi: ExtensionAPI): void {
 							const description = parsed.text.trim();
 							const subject = description.split("\n")[0].slice(0, 120);
 
-							const task = await createTask(teamDir, teamId, { subject, description, owner });
+							const task = await createTask(teamDir, effectiveTlId, { subject, description, owner });
 
 							if (owner) {
 								const payload = taskAssignmentPayload(task, "team-lead");
-								await writeToMailbox(teamDir, teamId, owner, {
+								await writeToMailbox(teamDir, effectiveTlId, owner, {
 									from: "team-lead",
 									text: JSON.stringify(payload),
 									timestamp: new Date().toISOString(),
@@ -1344,7 +1500,7 @@ export function runLeader(pi: ExtensionAPI): void {
 							}
 
 							const owner = sanitizeName(agent);
-							const updated = await updateTask(teamDir, teamId, taskId, (cur) => {
+							const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
 								if (cur.status !== "completed") {
 									return { ...cur, owner, status: "pending" };
 								}
@@ -1355,7 +1511,7 @@ export function runLeader(pi: ExtensionAPI): void {
 								return;
 							}
 
-							await writeToMailbox(teamDir, teamId, owner, {
+							await writeToMailbox(teamDir, effectiveTlId, owner, {
 								from: "team-lead",
 								text: JSON.stringify(taskAssignmentPayload(updated, "team-lead")),
 								timestamp: new Date().toISOString(),
@@ -1374,7 +1530,7 @@ export function runLeader(pi: ExtensionAPI): void {
 								return;
 							}
 
-							const updated = await updateTask(teamDir, teamId, taskId, (cur) => {
+							const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
 								if (cur.status !== "completed") {
 									return { ...cur, owner: undefined, status: "pending" };
 								}
@@ -1398,13 +1554,13 @@ export function runLeader(pi: ExtensionAPI): void {
 								return;
 							}
 
-							const task = await getTask(teamDir, teamId, taskId);
+							const task = await getTask(teamDir, effectiveTlId, taskId);
 							if (!task) {
 								ctx.ui.notify(`Task not found: ${taskId}`, "error");
 								return;
 							}
 
-							const blocked = task.status !== "completed" && (await isTaskBlocked(teamDir, teamId, task));
+							const blocked = task.status !== "completed" && (await isTaskBlocked(teamDir, effectiveTlId, task));
 
 							const lines: string[] = [];
 							lines.push(`#${task.id} ${task.subject}`);
@@ -1451,7 +1607,7 @@ export function runLeader(pi: ExtensionAPI): void {
 										return;
 									}
 
-									const res = await addTaskDependency(teamDir, teamId, taskId, depId);
+									const res = await addTaskDependency(teamDir, effectiveTlId, taskId, depId);
 									if (!res.ok) {
 										ctx.ui.notify(res.error, "error");
 										return;
@@ -1471,7 +1627,7 @@ export function runLeader(pi: ExtensionAPI): void {
 										return;
 									}
 
-									const res = await removeTaskDependency(teamDir, teamId, taskId, depId);
+									const res = await removeTaskDependency(teamDir, effectiveTlId, taskId, depId);
 									if (!res.ok) {
 										ctx.ui.notify(res.error, "error");
 										return;
@@ -1491,13 +1647,13 @@ export function runLeader(pi: ExtensionAPI): void {
 									}
 
 									await refreshTasks();
-									const task = tasks.find((t) => t.id === taskId) ?? (await getTask(teamDir, teamId, taskId));
+									const task = tasks.find((t) => t.id === taskId) ?? (await getTask(teamDir, effectiveTlId, taskId));
 									if (!task) {
 										ctx.ui.notify(`Task not found: ${taskId}`, "error");
 										return;
 									}
 
-									const blocked = task.status !== "completed" && (await isTaskBlocked(teamDir, teamId, task));
+									const blocked = task.status !== "completed" && (await isTaskBlocked(teamDir, effectiveTlId, task));
 
 									const lines: string[] = [];
 									lines.push(`#${task.id} ${task.subject}`);
@@ -1509,7 +1665,7 @@ export function runLeader(pi: ExtensionAPI): void {
 										lines.push("  (none)");
 									} else {
 										for (const id of task.blockedBy) {
-											const dep = tasks.find((t) => t.id === id) ?? (await getTask(teamDir, teamId, id));
+											const dep = tasks.find((t) => t.id === id) ?? (await getTask(teamDir, effectiveTlId, id));
 											lines.push(dep ? `  - #${id} ${dep.status} ${dep.subject}` : `  - #${id} (missing)`);
 										}
 									}
@@ -1520,7 +1676,7 @@ export function runLeader(pi: ExtensionAPI): void {
 										lines.push("  (none)");
 									} else {
 										for (const id of task.blocks) {
-											const child = tasks.find((t) => t.id === id) ?? (await getTask(teamDir, teamId, id));
+											const child = tasks.find((t) => t.id === id) ?? (await getTask(teamDir, effectiveTlId, id));
 											lines.push(child ? `  - #${id} ${child.status} ${child.subject}` : `  - #${id} (missing)`);
 										}
 									}
@@ -1580,7 +1736,7 @@ export function runLeader(pi: ExtensionAPI): void {
 								}
 							}
 
-							const res = await clearTasks(teamDir, teamId, mode);
+							const res = await clearTasks(teamDir, effectiveTlId, mode);
 							const deleted = res.deletedTaskIds.length;
 
 							if (res.errors.length) {
@@ -1615,11 +1771,25 @@ export function runLeader(pi: ExtensionAPI): void {
 
 							const slice = tasks.slice(-30);
 							const blocked = await Promise.all(
-								slice.map(async (t) => (t.status === "completed" ? false : await isTaskBlocked(teamDir, teamId, t))),
+								slice.map(async (t) => (t.status === "completed" ? false : await isTaskBlocked(teamDir, effectiveTlId, t))),
 							);
 
 							const preview = slice.map((t, i) => formatTaskLine(t, { blocked: blocked[i] })).join("\n");
 							ctx.ui.notify(preview, "info");
+							return;
+						}
+
+						case "use": {
+							const newId = taskRest[0];
+							if (!newId) {
+								ctx.ui.notify("Usage: /team task use <taskListId>", "error");
+								return;
+							}
+							taskListId = newId;
+							await ensureTeamConfig(teamDir, { teamId, taskListId: newId, leadName: "team-lead" });
+							ctx.ui.notify(`Task list ID set to: ${taskListId}`, "info");
+							await refreshTasks();
+							renderWidget();
 							return;
 						}
 
@@ -1628,6 +1798,88 @@ export function runLeader(pi: ExtensionAPI): void {
 							return;
 						}
 					}
+				}
+
+				case "plan": {
+					const [planSub, ...planRest] = rest;
+					if (!planSub || planSub === "help") {
+						ctx.ui.notify(
+							[
+								"Usage:",
+								"  /team plan approve <name>",
+								"  /team plan reject <name> [feedback...]",
+							].join("\n"),
+							"info",
+						);
+						return;
+					}
+
+					if (planSub === "approve") {
+						const nameRaw = planRest[0];
+						if (!nameRaw) {
+							ctx.ui.notify("Usage: /team plan approve <name>", "error");
+							return;
+						}
+						const name = sanitizeName(nameRaw);
+						const pending = pendingPlanApprovals.get(name);
+						if (!pending) {
+							ctx.ui.notify(`No pending plan approval for ${name}`, "error");
+							return;
+						}
+
+						const teamId = ctx.sessionManager.getSessionId();
+						const teamDir = getTeamDir(teamId);
+						const ts = new Date().toISOString();
+						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
+							from: "team-lead",
+							text: JSON.stringify({
+								type: "plan_approved",
+								requestId: pending.requestId,
+								from: "team-lead",
+								timestamp: ts,
+							}),
+							timestamp: ts,
+						});
+						pendingPlanApprovals.delete(name);
+						ctx.ui.notify(`Approved plan for ${name}`, "info");
+						return;
+					}
+
+					if (planSub === "reject") {
+						const nameRaw = planRest[0];
+						if (!nameRaw) {
+							ctx.ui.notify("Usage: /team plan reject <name> [feedback...]", "error");
+							return;
+						}
+						const name = sanitizeName(nameRaw);
+						const pending = pendingPlanApprovals.get(name);
+						if (!pending) {
+							ctx.ui.notify(`No pending plan approval for ${name}`, "error");
+							return;
+						}
+
+						const feedback = planRest.slice(1).join(" ").trim() || "Plan rejected";
+						const teamId = ctx.sessionManager.getSessionId();
+						const teamDir = getTeamDir(teamId);
+						const ts = new Date().toISOString();
+						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
+							from: "team-lead",
+							text: JSON.stringify({
+								type: "plan_rejected",
+								requestId: pending.requestId,
+								from: "team-lead",
+								feedback,
+								timestamp: ts,
+							}),
+							timestamp: ts,
+						});
+						pendingPlanApprovals.delete(name);
+						ctx.ui.notify(`Rejected plan for ${name}: ${feedback}`, "info");
+						return;
+					}
+
+					ctx.ui.notify(`Unknown plan subcommand: ${planSub}`, "error");
+					return;
 				}
 
 				default: {
