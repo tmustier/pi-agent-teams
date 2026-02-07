@@ -13,6 +13,10 @@
 
 # Logs
 *.log
+npm-debug.log*
+
+# Lockfiles
+package-lock.json
 
 # macOS
 .DS_Store
