@@ -25,6 +25,7 @@ node_modules/
 # Local artifacts (never commit)
 .artifacts/
 .research/
+.resume-sessions/
 
 # Local runs / scratch
 /test*/
