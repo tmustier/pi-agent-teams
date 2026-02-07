@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+**/.DS_Store
+._*
+
+# Dependencies
+node_modules/
+
+# Build output / caches
+/dist/
+/build/
+/coverage/
+*.tsbuildinfo
+.eslintcache
+
+# Editor
+.vscode/
+.idea/
+
+# Env / credentials
+.env
+.env.*
+*.pem
+
+# Local artifacts (never commit)
+.artifacts/
+.research/
+
+# Local runs / scratch
+/test*/
+/tmp/
+
+# Logs
+*.log
+
+# Misc
+*.tmp
