@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
@@ -29,13 +29,15 @@ import {
 	removeTaskDependency,
 	unassignTasksForAgent,
 	updateTask,
-	type TaskStatus,
 	type TeamTask,
 } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig, type TeamMember } from "./team-config.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { ensureWorktreeCwd } from "./worktree.js";
+import { ActivityTracker } from "./activity-tracker.js";
+import { createTeamsWidget } from "./teams-widget.js";
+import { openTeamsPanel } from "./teams-panel.js";
 
 
 type ContextMode = "fresh" | "branch";
@@ -78,6 +80,8 @@ const TeamsToolParams = Type.Object({
 	contextMode: Type.Optional(TeamsContextModeSchema),
 	workspaceMode: Type.Optional(TeamsWorkspaceModeSchema),
 });
+
+type TeamsToolParamsType = Static<typeof TeamsToolParams>;
 
 function getTeamsExtensionEntryPath(): string | null {
 	// In dev, teammates won't automatically have this extension unless it is installed or discoverable.
@@ -157,16 +161,6 @@ async function createSessionForTeammate(
 	}
 }
 
-function countTasks(tasks: TeamTask[]): Record<TaskStatus, number> {
-	return tasks.reduce(
-		(acc, t) => {
-			acc[t.status] = (acc[t.status] ?? 0) + 1;
-			return acc;
-		},
-		{ pending: 0, in_progress: 0, completed: 0 } as Record<TaskStatus, number>,
-	);
-}
-
 function taskAssignmentPayload(task: TeamTask, assignedBy: string) {
 	return {
 		type: "task_assignment",
@@ -187,6 +181,9 @@ export function runLeader(pi: ExtensionAPI): void {
 	let teamConfig: TeamConfig | null = null;
 	const pendingPlanApprovals = new Map<string, { requestId: string; name: string; taskId?: string }>();
 	let taskListId: string | null = process.env.PI_TEAMS_TASK_LIST_ID ?? null;
+
+	const tracker = new ActivityTracker();
+	let widgetTui: { requestRender(): void } | null = null;
 
 	let refreshTimer: NodeJS.Timeout | null = null;
 	let inboxTimer: NodeJS.Timeout | null = null;
@@ -235,68 +232,22 @@ export function runLeader(pi: ExtensionAPI): void {
 			}));
 	};
 
-	const renderWidget = () => {
-		if (!currentCtx || !currentTeamId) return;
+	const installWidget = (ctx: ExtensionCommandContext) => {
+		const widgetFactory = createTeamsWidget({
+			getTeammates: () => teammates,
+			getTracker: () => tracker,
+			getTasks: () => tasks,
+			getTeamConfig: () => teamConfig,
+			isDelegateMode: () => delegateMode,
+		});
+		ctx.ui.setWidget("pi-teams", (tui, theme) => {
+			widgetTui = tui;
+			return widgetFactory(tui, theme);
+		}, { placement: "belowEditor" });
+	};
 
-		// Hide the widget entirely when there is no active team state.
-		const hasOnlineMembers = (teamConfig?.members ?? []).some(
-			(m) => m.role === "worker" && m.status === "online",
-		);
-		if (teammates.size === 0 && tasks.length === 0 && !hasOnlineMembers) {
-			currentCtx.ui.setWidget("pi-teams", []);
-			return;
-		}
-
-		const lines: string[] = [];
-		lines.push(delegateMode ? "Teams [delegate]" : "Teams");
-
-		const c = countTasks(tasks);
-		lines.push(`  Tasks: pending ${c.pending} • in_progress ${c.in_progress} • completed ${c.completed}`);
-
-		const cfgWorkers = (teamConfig?.members ?? []).filter((m) => m.role === "worker");
-		const cfgByName = new Map<string, TeamMember>();
-		for (const m of cfgWorkers) cfgByName.set(m.name, m);
-
-		const visibleNames = new Set<string>();
-		for (const name of teammates.keys()) visibleNames.add(name);
-		for (const m of cfgWorkers) {
-			if (m.status === "online") visibleNames.add(m.name);
-		}
-		// Fallback: show active task owners even if they haven't been persisted in config yet.
-		for (const t of tasks) {
-			if (t.owner && t.status === "in_progress") visibleNames.add(t.owner);
-		}
-
-		if (visibleNames.size === 0) {
-			lines.push("  (no teammates)  •  /team spawn <name> [fresh|branch] [shared|worktree]");
-			lines.push("  /team task add <text...>  •  /team task list");
-		} else {
-			for (const name of Array.from(visibleNames).sort()) {
-				const rpc = teammates.get(name);
-				const cfg = cfgByName.get(name);
-
-				const active = tasks.find((x) => x.owner === name && x.status === "in_progress");
-				const taskTag = active ? `task:${active.id}` : "";
-
-				if (rpc) {
-					const status = rpc.status.padEnd(9);
-					const tail = rpc.lastAssistantText.trim().split("\n").slice(-1)[0];
-					lines.push(
-						`  ${name}: ${status} ${taskTag ? "• " + taskTag + " " : ""}${tail ? "• " + tail.slice(0, 60) : ""}`,
-					);
-				} else {
-					const status = (cfg?.status ?? "offline").padEnd(9);
-					const seen = cfg?.lastSeenAt ? `• seen ${cfg.lastSeenAt.slice(11, 19)}` : "";
-					lines.push(`  ${name}: ${status} ${taskTag ? "• " + taskTag : ""} ${seen}`.trimEnd());
-				}
-			}
-
-			lines.push("  /team dm <name> <msg...>  •  /team broadcast <msg...>");
-			if (teammates.size > 0) lines.push("  /team send <name> <msg...>  •  /team kill <name>");
-			lines.push("  /team task add <text...>  •  /team task list");
-		}
-
-		currentCtx.ui.setWidget("pi-teams", lines);
+	const requestRender = () => {
+		widgetTui?.requestRender();
 	};
 
 	type SpawnTeammateResult =
@@ -661,8 +612,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		].join(" "),
 		parameters: TeamsToolParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<any>> {
-			const action = (params as any).action ?? "delegate";
+		async execute(_toolCallId, params: TeamsToolParamsType, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+			const action = params.action ?? "delegate";
 			if (action !== "delegate") {
 				return {
 					content: [{ type: "text", text: `Unsupported action: ${String(action)}` }],
