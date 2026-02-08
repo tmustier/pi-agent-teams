@@ -385,17 +385,31 @@ console.log("\n6. protocol parsers");
 // ── 7. Pi CLI extension loading (non-interactive) ────────────────────
 console.log("\n7. Pi extension loading");
 {
-	// Test that `pi --help` with our extension specified doesn't crash
 	const { execSync } = await import("node:child_process");
-	try {
-		const out = execSync("pi --version", {
-			cwd: process.cwd(),
-			timeout: 10_000,
-			encoding: "utf8",
-		});
-		assert(out.trim().length > 0, "pi --version works");
-	} catch (e) {
-		assert(false, `pi --version failed: ${e instanceof Error ? e.message : String(e)}`);
+
+	// `pi` is expected to be installed in local dev, but it's usually not available in CI.
+	const hasPi = (() => {
+		try {
+			execSync("command -v pi", { stdio: "ignore" });
+			return true;
+		} catch {
+			return false;
+		}
+	})();
+
+	if (!hasPi) {
+		console.log("  (skipped) pi CLI not found on PATH");
+	} else {
+		try {
+			const out = execSync("pi --version", {
+				cwd: process.cwd(),
+				timeout: 10_000,
+				encoding: "utf8",
+			});
+			assert(out.trim().length > 0, "pi --version works");
+		} catch (e) {
+			assert(false, `pi --version failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
 	}
 }
 

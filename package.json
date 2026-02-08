@@ -27,6 +27,11 @@
     "integration-todo-test": "tsx scripts/integration-todo-test.mts"
   },
   "devDependencies": {
+    "@mariozechner/pi-agent-core": "^0.52.8",
+    "@mariozechner/pi-ai": "^0.52.8",
+    "@mariozechner/pi-coding-agent": "^0.52.8",
+    "@mariozechner/pi-tui": "^0.52.8",
+    "@sinclair/typebox": "^0.34.48",
     "typescript": "^5.9.3",
     "tsx": "^4.20.5"
   },
