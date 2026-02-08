@@ -17,6 +17,6 @@
 
 		"noEmit": true
 	},
-	"include": ["extensions/**/*.ts", "scripts/**/*.ts"],
+	"include": ["extensions/**/*.ts", "scripts/**/*.ts", "scripts/**/*.mts"],
 	"exclude": ["node_modules", "dist", "build", "coverage"]
 }

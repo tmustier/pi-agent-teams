@@ -69,6 +69,10 @@ function assertEq(actual: unknown, expected: unknown, label: string) {
 	assert(ok, label);
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teams-smoke-"));
 const teamDir = path.join(tmpRoot, "team-test");
 const taskListId = "smoke-tl";
@@ -92,6 +96,41 @@ console.log("\n2. fs-lock.withLock");
 	assert(!fs.existsSync(lockFile), "lock file cleaned up after");
 }
 
+{
+	// Stale lock is removed.
+	const lockFile = path.join(tmpRoot, "stale.lock");
+	fs.writeFileSync(lockFile, "stale");
+	const old = new Date(Date.now() - 120_000);
+	fs.utimesSync(lockFile, old, old);
+
+	const result = await withLock(lockFile, async () => "ok", { staleMs: 1, timeoutMs: 500 });
+	assertEq(result, "ok", "withLock removes stale lock file");
+	assert(!fs.existsSync(lockFile), "stale lock cleaned up after");
+}
+
+{
+	// Contention: many concurrent callers should serialize without throwing.
+	const lockFile = path.join(tmpRoot, "contended.lock");
+	const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+	let counter = 0;
+
+	const runners = Array.from({ length: 20 }, () =>
+		withLock(
+			lockFile,
+			async () => {
+				counter += 1;
+				await sleep(5);
+				return counter;
+			},
+			{ timeoutMs: 5_000, pollMs: 2 },
+		),
+	);
+
+	await Promise.all(runners);
+	assertEq(counter, 20, "withLock serializes contended callers");
+	assert(!fs.existsSync(lockFile), "contended lock cleaned up after");
+}
+
 // ── 3. mailbox ───────────────────────────────────────────────────────
 console.log("\n3. mailbox");
 {
@@ -103,14 +142,21 @@ console.log("\n3. mailbox");
 	const inboxPath = getInboxPath(teamDir, TEAM_MAILBOX_NS, "agent1");
 	assert(fs.existsSync(inboxPath), "inbox file created");
 
-	const raw = JSON.parse(fs.readFileSync(inboxPath, "utf8"));
-	assertEq(raw.length, 1, "one message in inbox");
-	assertEq(raw[0].read, false, "message initially unread");
+	const raw: unknown = JSON.parse(fs.readFileSync(inboxPath, "utf8"));
+	assert(Array.isArray(raw), "inbox json is array");
+	assertEq(Array.isArray(raw) ? raw.length : 0, 1, "one message in inbox");
+	const first = Array.isArray(raw) ? raw.at(0) : undefined;
+	assert(isRecord(first) && typeof first.read === "boolean", "message has boolean read");
+	if (isRecord(first) && typeof first.read === "boolean") {
+		assertEq(first.read, false, "message initially unread");
+	}
 
 	// pop
 	const msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
 	assertEq(msgs.length, 1, "popUnreadMessages returns 1");
-	assertEq(msgs[0].text, "hello agent1", "message text correct");
+	const m0 = msgs.at(0);
+	assert(m0 !== undefined, "pop returned first message");
+	if (m0) assertEq(m0.text, "hello agent1", "message text correct");
 
 	// re-pop should be empty
 	const msgs2 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
@@ -175,9 +221,12 @@ console.log("\n4. task-store");
 	assertEq(t1done?.status, "completed", "completeTask sets completed");
 
 	// formatTaskLine
-	const line = formatTaskLine(t1done!);
-	assert(line.includes("completed"), "formatTaskLine includes status");
-	assert(line.includes("Write tests"), "formatTaskLine includes subject");
+	assert(t1done !== null, "completed task can be re-fetched");
+	if (t1done) {
+		const line = formatTaskLine(t1done);
+		assert(line.includes("completed"), "formatTaskLine includes status");
+		assert(line.includes("Write tests"), "formatTaskLine includes subject");
+	}
 
 	// claimNextAvailableTask
 	const t3 = await createTask(teamDir, taskListId, {
@@ -197,7 +246,9 @@ console.log("\n4. task-store");
 	// dependencies
 	const depRes = await addTaskDependency(teamDir, taskListId, t3.id, t2.id);
 	assert(depRes.ok, "addTaskDependency ok");
-	const blocked = await isTaskBlocked(teamDir, taskListId, (await getTask(teamDir, taskListId, t3.id))!);
+	const t3fetched = await getTask(teamDir, taskListId, t3.id);
+	assert(t3fetched !== null, "getTask returns dependency task");
+	const blocked = t3fetched ? await isTaskBlocked(teamDir, taskListId, t3fetched) : false;
 	assert(blocked, "task is blocked by dependency");
 
 	const rmDep = await removeTaskDependency(teamDir, taskListId, t3.id, t2.id);
@@ -220,7 +271,9 @@ console.log("\n5. team-config");
 	assertEq(cfg.version, 1, "config version 1");
 	assertEq(cfg.teamId, "smoke-team", "teamId set");
 	assert(cfg.members.length >= 1, "has at least lead member");
-	assertEq(cfg.members[0].role, "lead", "first member is lead");
+	const firstMember = cfg.members.at(0);
+	assert(firstMember !== undefined, "first member exists");
+	if (firstMember) assertEq(firstMember.role, "lead", "first member is lead");
 
 	// idempotent
 	const cfg2 = await ensureTeamConfig(teamDir, {
@@ -241,10 +294,12 @@ console.log("\n5. team-config");
 	// setMemberStatus
 	const cfg4 = await setMemberStatus(teamDir, "agent1", "offline");
 	assert(cfg4 !== null, "setMemberStatus returns config");
-	assert(
-		cfg4!.members.some((m) => m.name === "agent1" && m.status === "offline"),
-		"setMemberStatus changes status",
-	);
+	if (cfg4) {
+		assert(
+			cfg4.members.some((m) => m.name === "agent1" && m.status === "offline"),
+			"setMemberStatus changes status",
+		);
+	}
 
 	// loadTeamConfig
 	const loaded = await loadTeamConfig(teamDir);

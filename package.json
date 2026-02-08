@@ -23,7 +23,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.strict.json",
     "smoke-test": "tsx scripts/smoke-test.mts",
-    "integration-claim-test": "tsx scripts/integration-claim-test.mts"
+    "integration-claim-test": "tsx scripts/integration-claim-test.mts",
+    "integration-todo-test": "tsx scripts/integration-todo-test.mts"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
