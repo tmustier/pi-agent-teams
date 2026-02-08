@@ -47,7 +47,7 @@ function formatTimestamp(ts: number): string {
 export async function openTeamsPanel(ctx: ExtensionCommandContext, deps: PanelDeps): Promise<void> {
 	const names = getVisibleNames(deps);
 	if (names.length === 0) {
-		ctx.ui.notify("No teammates to show", "info");
+		ctx.ui.notify("No comrades to show", "info");
 		return;
 	}
 

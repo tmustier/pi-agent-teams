@@ -49,7 +49,7 @@ export async function handleTeamSpawnCommand(opts: {
 
 	for (const w of res.warnings) ctx.ui.notify(w, "warning");
 	ctx.ui.notify(
-		`Spawned teammate '${res.name}' (${res.mode}${res.note ? ", " + res.note : ""} • ${res.workspaceMode})`,
+		`Spawned comrade '${res.name}' (${res.mode}${res.note ? ", " + res.note : ""} • ${res.workspaceMode})`,
 		"info",
 	);
 }

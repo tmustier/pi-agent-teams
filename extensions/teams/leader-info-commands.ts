@@ -25,7 +25,7 @@ export async function handleTeamListCommand(opts: {
 	for (const name of cfgByName.keys()) names.add(name);
 
 	if (names.size === 0) {
-		ctx.ui.notify("No teammates", "info");
+		ctx.ui.notify("No comrades", "info");
 		renderWidget();
 		return;
 	}

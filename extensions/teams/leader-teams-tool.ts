@@ -29,18 +29,18 @@ const TeamsActionSchema = StringEnum(["delegate"] as const, {
 });
 
 const TeamsContextModeSchema = StringEnum(["fresh", "branch"] as const, {
-	description: "How to initialize teammate session context. 'branch' clones the leader session branch.",
+	description: "How to initialize comrade session context. 'branch' clones the leader session branch.",
 	default: "fresh",
 });
 
 const TeamsWorkspaceModeSchema = StringEnum(["shared", "worktree"] as const, {
-	description: "Workspace isolation mode. 'shared' matches Claude Teams; 'worktree' creates a git worktree per teammate.",
+	description: "Workspace isolation mode. 'shared' matches Claude Teams; 'worktree' creates a git worktree per comrade.",
 	default: "shared",
 });
 
 const TeamsDelegateTaskSchema = Type.Object({
 	text: Type.String({ description: "Task / TODO text." }),
-	assignee: Type.Optional(Type.String({ description: "Optional teammate name. If omitted, assigned round-robin." })),
+	assignee: Type.Optional(Type.String({ description: "Optional comrade name. If omitted, assigned round-robin." })),
 });
 
 const TeamsToolParamsSchema = Type.Object({
@@ -48,12 +48,12 @@ const TeamsToolParamsSchema = Type.Object({
 	tasks: Type.Optional(Type.Array(TeamsDelegateTaskSchema, { description: "Tasks to delegate (action=delegate)." })),
 	teammates: Type.Optional(
 		Type.Array(Type.String(), {
-			description: "Explicit teammate names to use/spawn. If omitted, uses existing or auto-generates.",
+			description: "Explicit comrade names to use/spawn. If omitted, uses existing or auto-generates.",
 		}),
 	),
 	maxTeammates: Type.Optional(
 		Type.Integer({
-			description: "If teammates is omitted and none exist, spawn up to this many.",
+			description: "If comrades list is omitted and none exist, spawn up to this many.",
 			default: 4,
 			minimum: 1,
 			maximum: 16,
@@ -80,8 +80,8 @@ export function registerTeamsTool(opts: {
 		name: "teams",
 		label: "Teams",
 		description: [
-			"Spawn teammate agents and delegate tasks. Each teammate is a child Pi process that executes work autonomously and reports back.",
-			"Provide a list of tasks with optional assignees; teammates are spawned automatically and assigned round-robin if unspecified.",
+			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
+			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
 			"For governance, the user can run /team delegate on (leader restricted to coordination) or /team spawn <name> plan (worker needs plan approval).",
 		].join(" "),

@@ -55,7 +55,7 @@ export async function handleTeamCleanupCommand(opts: {
 
 	if (!force && teammates.size > 0) {
 		ctx.ui.notify(
-			`Refusing to cleanup while ${teammates.size} RPC teammate(s) are running. Stop them first or use --force.`,
+			`Refusing to cleanup while ${teammates.size} RPC comrade(s) are running. Stop them first or use --force.`,
 			"error",
 		);
 		return;
@@ -182,7 +182,7 @@ export async function handleTeamShutdownCommand(opts: {
 	// Only prompt in interactive TTY mode. In RPC mode, confirm() would require
 	// the host to send extension_ui_response messages.
 	if (process.stdout.isTTY && process.stdin.isTTY) {
-		const ok = await ctx.ui.confirm("Shutdown", "Exit pi and stop all teammates?");
+		const ok = await ctx.ui.confirm("Shutdown", "Exit pi and stop all comrades?");
 		if (!ok) return;
 	}
 	// In RPC mode, shutdown is deferred until the next input line is handled.
@@ -263,7 +263,7 @@ export async function handleTeamKillCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const t = teammates.get(name);
 	if (!t) {
-		ctx.ui.notify(`Unknown teammate: ${name}`, "error");
+		ctx.ui.notify(`Unknown comrade: ${name}`, "error");
 		return;
 	}
 
@@ -273,10 +273,10 @@ export async function handleTeamKillCommand(opts: {
 	const teamId = ctx.sessionManager.getSessionId();
 	const teamDir = getTeamDir(teamId);
 	const effectiveTlId = taskListId ?? teamId;
-	await unassignTasksForAgent(teamDir, effectiveTlId, name, `Killed teammate '${name}'`);
+	await unassignTasksForAgent(teamDir, effectiveTlId, name, `Killed comrade '${name}'`);
 	await setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
 
-	ctx.ui.notify(`Killed teammate ${name}`, "warning");
+	ctx.ui.notify(`Killed comrade ${name}`, "warning");
 	await refreshTasks();
 	renderWidget();
 }

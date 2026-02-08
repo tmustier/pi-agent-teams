@@ -24,7 +24,7 @@ export async function handleTeamSendCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const t = teammates.get(name);
 	if (!t) {
-		ctx.ui.notify(`Unknown teammate: ${name}`, "error");
+		ctx.ui.notify(`Unknown comrade: ${name}`, "error");
 		return;
 	}
 	if (t.status === "streaming") await t.followUp(msg);
@@ -50,7 +50,7 @@ export async function handleTeamSteerCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const t = teammates.get(name);
 	if (!t) {
-		ctx.ui.notify(`Unknown teammate: ${name}`, "error");
+		ctx.ui.notify(`Unknown comrade: ${name}`, "error");
 		return;
 	}
 	await t.steer(msg);
@@ -116,7 +116,7 @@ export async function handleTeamBroadcastCommand(opts: {
 
 	const names = Array.from(recipients).sort();
 	if (names.length === 0) {
-		ctx.ui.notify("No teammates to broadcast to", "warning");
+		ctx.ui.notify("No comrades to broadcast to", "warning");
 		return;
 	}
 
@@ -131,5 +131,5 @@ export async function handleTeamBroadcastCommand(opts: {
 		),
 	);
 
-	ctx.ui.notify(`Broadcast queued for ${names.length} teammate(s): ${names.join(", ")}`, "info");
+	ctx.ui.notify(`Broadcast queued for ${names.length} comrade(s): ${names.join(", ")}`, "info");
 }

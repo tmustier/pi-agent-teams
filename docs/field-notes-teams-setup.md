@@ -9,7 +9,7 @@ Goal: dogfood the Teams extension to implement its own roadmap (Claude parity), 
 Decisions: tmux session `pi-teams-test1`; `PI_TEAMS_ROOT_DIR=~/projects/pi-agent-teams/test1`; `teamId=0baaa0e6-8020-4d9a-bf33-c1a65f99a2f7`; workers started manually in tmux (not `/team spawn`).
 
 First impressions:
-- Manual tmux workers are usable. Initially the leader showed “(no teammates)” because it only tracked RPC-spawned workers; now manual workers **upsert themselves into `config.json` on startup**, and the leader widget renders online workers from team config.
+- Manual tmux workers are usable. Initially the leader showed “(no comrades)” because it only tracked RPC-spawned workers; now manual workers **upsert themselves into `config.json` on startup**, and the leader widget renders online workers from team config.
 - Pinning `PI_TEAMS_ROOT_DIR` made reruns/id discovery predictable (no “find the new folder” step).
 - tmux workflow feels close to Claude-style split panes; bootstrap ergonomics still need smoothing.
 - Surprise: `/team spawn <name> branch` failed once with `Entry <id> not found` (branch-from leaf missing on disk); `/team spawn <name> fresh` worked.
@@ -73,9 +73,9 @@ First impressions:
 
 - **tmux vs `/team spawn`**: `/team spawn` uses `pi --mode rpc` subprocesses.
   - Pros: simple, managed lifecycle.
-  - Cons: you don’t see a full interactive teammate UI like Claude’s split-pane mode.
+  - Cons: you don’t see a full interactive comrade UI like Claude’s split-pane mode.
   - We manually started workers in separate tmux windows (setting `PI_TEAMS_WORKER=1`, `PI_TEAMS_TEAM_ID=...`, etc). This now shows up in the leader widget because workers upsert themselves into `config.json`, and the leader renders online workers from team config.
-  - Update: leader now renders teammates from `team config` and also auto-adds unknown senders on idle notifications (so manual tmux workers feel first-class).
+  - Update: leader now renders comrades from `team config` and also auto-adds unknown senders on idle notifications (so manual tmux workers feel first-class).
   - Improvement idea: optional spawn mode that starts a worker in a new tmux pane/window.
 
 - **Two messaging paths** (`/team send` vs `/team dm`):
@@ -84,7 +84,7 @@ First impressions:
   - Improvement idea: clearer naming and/or a single “message” command with a mode flag.
 
 - **Runaway tasks / timeboxing**: a vague task prompt can turn into a long “research spiral”.
-  - In manual-tmux mode, there isn’t a great way (yet) for the leader to *steer* an in-flight run (unlike `/team steer` for RPC-spawned teammates).
+  - In manual-tmux mode, there isn’t a great way (yet) for the leader to *steer* an in-flight run (unlike `/team steer` for RPC-spawned comrades).
   - Improvement idea: add a mailbox-level “steer” protocol message that workers can treat as an in-flight follow-up if they’re currently running.
 
 - **Failure semantics are underspecified**: tool failures show up in the worker UI, but our task store currently only supports `pending|in_progress|completed`.

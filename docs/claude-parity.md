@@ -17,7 +17,7 @@ This document tracks **feature parity gaps** between:
 - Target the **same coordination primitives** as Claude Teams:
   - shared task list
   - mailbox messaging
-  - long-lived teammates
+  - long-lived comrades
 - Prefer **inspectable, local-first artifacts** (files + lock files).
 - Avoid guidance that bypasses Claude feature gating; we only document behavior.
 - Accept that some Claude UX (terminal keybindings + split-pane integration) may not be achievable in Pi without deeper TUI/terminal integration.
@@ -31,16 +31,16 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Enablement | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` + settings | N/A | Pi extension is always available when installed/loaded. | — |
 | Team config | `~/.claude/teams/<team>/config.json` w/ members | ✅ | Implemented via `extensions/teams/team-config.ts` (stored under `~/.pi/agent/teams/...` or `PI_TEAMS_ROOT_DIR`). | P0 |
 | Task list (shared) | `~/.claude/tasks/<taskListId>/` + states + deps | ✅ | File-per-task + deps (`blockedBy`/`blocks`); `/team task dep add|rm|ls`; self-claim skips blocked tasks. | P0 |
-| Self-claim | Teammates can self-claim next unassigned, unblocked task; file locking | ✅ | Implemented: `claimNextAvailableTask()` + locks; enabled by default (`PI_TEAMS_DEFAULT_AUTO_CLAIM=1`). | P0 |
-| Explicit assign | Lead assigns task to teammate | ✅ | `/team task assign` sets owner + pings via mailbox. | P0 |
-| “Message” vs “broadcast” | Send to one teammate or all teammates | ✅ | `/team dm` + `/team broadcast` use mailbox; `/team send` uses RPC. Broadcast recipients = team config workers + RPC-spawned map + active task owners; manual tmux workers self-register into `config.json` on startup. | P0 |
-| Teammate↔teammate messaging | Teammates can message each other directly | ✅ | Workers register `team_message` LLM-callable tool; sends via mailbox + CC's leader with `peer_dm_sent` notification. | P1 |
-| Display modes | In-process selection (Shift+Up/Down); split panes (tmux/iTerm) | ❌ | Pi has a widget + commands, but no terminal-level teammate navigation/panes. | P2 |
+| Self-claim | Comrades can self-claim next unassigned, unblocked task; file locking | ✅ | Implemented: `claimNextAvailableTask()` + locks; enabled by default (`PI_TEAMS_DEFAULT_AUTO_CLAIM=1`). | P0 |
+| Explicit assign | Lead assigns task to comrade | ✅ | `/team task assign` sets owner + pings via mailbox. | P0 |
+| “Message” vs “broadcast” | Send to one comrade or all comrades | ✅ | `/team dm` + `/team broadcast` use mailbox; `/team send` uses RPC. Broadcast recipients = team config workers + RPC-spawned map + active task owners; manual tmux workers self-register into `config.json` on startup. | P0 |
+| Comrade↔comrade messaging | Comrades can message each other directly | ✅ | Workers register `team_message` LLM-callable tool; sends via mailbox + CC's leader with `peer_dm_sent` notification. | P1 |
+| Display modes | In-process selection (Shift+Up/Down); split panes (tmux/iTerm) | ❌ | Pi has a widget + commands, but no terminal-level comrade navigation/panes. | P2 |
 | Delegate mode | Lead restricted to coordination-only tools | ✅ | `/team delegate [on|off]` toggles; `pi.on("tool_call")` blocks `bash/edit/write`; `PI_TEAMS_DELEGATE_MODE=1` env. Widget shows `[delegate]`. | P1 |
-| Plan approval | Teammate can be "plan required" and needs lead approval to implement | ✅ | `/team spawn <name> plan` sets `PI_TEAMS_PLAN_REQUIRED=1`; worker restricted to read-only tools; submits plan via `plan_approval_request`; `/team plan approve|reject <name>`. | P1 |
-| Shutdown handshake | Lead requests shutdown; teammate can approve/reject | ✅ | Full protocol: `shutdown_request` → `shutdown_approved` or `shutdown_rejected` (when worker is busy). `/team shutdown <name>` (graceful) + `/team kill` (force). | P1 |
-| Cleanup team | “Clean up the team” removes shared resources after teammates stopped | ✅ | `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks. | P1 |
-| Hooks / quality gates | `TeammateIdle`, `TaskCompleted` hooks | ❌ | Add optional hook runner in leader on idle/task-complete events (script execution + exit-code gating). | P2 |
+| Plan approval | Comrade can be "plan required" and needs lead approval to implement | ✅ | `/team spawn <name> plan` sets `PI_TEAMS_PLAN_REQUIRED=1`; worker restricted to read-only tools; submits plan via `plan_approval_request`; `/team plan approve|reject <name>`. | P1 |
+| Shutdown handshake | Lead requests shutdown; comrade can approve/reject | ✅ | Full protocol: `shutdown_request` → `shutdown_approved` or `shutdown_rejected` (when worker is busy). `/team shutdown <name>` (graceful) + `/team kill` (force). | P1 |
+| Cleanup team | “Clean up the team” removes shared resources after comrades stopped | ✅ | `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks. | P1 |
+| Hooks / quality gates | `ComradeIdle`, `TaskCompleted` hooks | ❌ | Add optional hook runner in leader on idle/task-complete events (script execution + exit-code gating). | P2 |
 | Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` show blocked/deps; `/team task show <id>`; `/team task clear [completed|all]`. No Ctrl+T toggle yet. | P0 |
 | Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | ✅ | `PI_TEAMS_TASK_LIST_ID` env on leader + worker; `/team task use <taskListId>` switches the leader (and newly spawned workers). Existing workers need a restart to pick up changes. Persisted in config.json. | P1 |
 
@@ -80,7 +80,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 
 7) **Cleanup** ✅
    - `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks.
-   - Refuses if RPC teammates are running or there are `in_progress` tasks unless `--force`.
+   - Refuses if RPC comrades are running or there are `in_progress` tasks unless `--force`.
 
 8) **Peer-to-peer messaging** ✅
    - Workers register `team_message` LLM-callable tool (recipient + message params)
@@ -93,10 +93,10 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 
 ### P2: UX + “product-level” parity
 
-10) **Better teammate interaction UX**
+10) **Better comrade interaction UX**
    - Explore whether Pi’s TUI API can support:
-     - selecting a teammate from the widget
-     - “entering” a teammate transcript view
+     - selecting a comrade from the widget
+     - “entering” a comrade transcript view
    - (Optional) tmux integration for split panes.
 
 11) **Hooks / quality gates**

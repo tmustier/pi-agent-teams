@@ -62,7 +62,7 @@ pi   # auto-loads from extensions dir
 
 **Expected:** shows usage lines for `/team spawn`, `/team task`, etc.
 
-### 3c. Spawn a teammate
+### 3c. Spawn a comrade
 
 ```
 /team spawn agent1 fresh shared

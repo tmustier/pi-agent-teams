@@ -237,8 +237,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		let workspaceMode: WorkspaceMode = opts.workspaceMode ?? "shared";
 
 		const name = sanitizeName(opts.name);
-		if (!name) return { ok: false, error: "Missing teammate name" };
-		if (teammates.has(name)) return { ok: false, error: `Teammate already exists: ${name}` };
+		if (!name) return { ok: false, error: "Missing comrade name" };
+		if (teammates.has(name)) return { ok: false, error: `Comrade already exists: ${name}` };
 
 		const teamId = ctx.sessionManager.getSessionId();
 		const teamDir = getTeamDir(teamId);
@@ -267,7 +267,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 			if (currentCtx?.sessionManager.getSessionId() !== leaderSessionId) return;
 			const effectiveTlId = taskListId ?? leaderSessionId;
-			void unassignTasksForAgent(teamDir, effectiveTlId, name, `Teammate '${name}' exited`).finally(() => {
+			void unassignTasksForAgent(teamDir, effectiveTlId, name, `Comrade '${name}' exited`).finally(() => {
 				void refreshTasks().finally(renderWidget);
 			});
 			void setMemberStatus(teamDir, name, "offline", { meta: { exitCode: code ?? undefined } });
@@ -293,7 +293,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 		argsForChild.push(
 			"--append-system-prompt",
-			`You are teammate '${name}'. You collaborate with a team lead. Prefer working from the shared task list.\n`,
+			`You are comrade '${name}'. You collaborate with the chairman. Prefer working from the shared task list.\n`,
 		);
 
 		const autoClaim = (process.env.PI_TEAMS_DEFAULT_AUTO_CLAIM ?? "1") === "1";
@@ -379,7 +379,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		if (!delegateMode) return;
 		const blockedTools = new Set(["bash", "edit", "write"]);
 		if (blockedTools.has(event.toolName)) {
-			return { block: true, reason: "Delegate mode is active - use teammates for implementation." };
+			return { block: true, reason: "Delegate mode is active - use comrades for implementation." };
 		}
 	});
 
@@ -488,7 +488,7 @@ export function runLeader(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("team", {
-		description: "Teams: spawn teammates + coordinate via Claude-like task list",
+		description: "Teams: spawn comrades + coordinate via Claude-like task list",
 		handler: async (args, ctx) => {
 			currentCtx = ctx;
 			currentTeamId = ctx.sessionManager.getSessionId();

@@ -99,7 +99,7 @@ function buildTaskPrompt(agentName: string, task: TeamTask, planOnly = false): s
 		? "Produce a detailed implementation plan only. Do NOT make any changes or implement anything yet. Your plan will be reviewed before you can proceed."
 		: "Do the work now. When finished, reply with a concise summary and any key outputs.";
 	return [
-		`You are teammate '${agentName}'.`,
+		`You are comrade '${agentName}'.`,
 		`You have been assigned task #${task.id}.`,
 		`Subject: ${task.subject}`,
 		"",
@@ -117,7 +117,7 @@ export function runWorker(pi: ExtensionAPI): void {
 	const { teamId, teamDir, taskListId, agentName, leadName, autoClaim } = env;
 
 	const TeamMessageToolParamsSchema = Type.Object({
-		recipient: Type.String({ description: "Name of the teammate to message" }),
+		recipient: Type.String({ description: "Name of the comrade to message" }),
 		message: Type.String({ description: "The message to send" }),
 	});
 	// Match the schema at compile-time.
@@ -128,7 +128,7 @@ export function runWorker(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "team_message",
 		label: "Team Message",
-		description: "Send a message to a teammate. Use this to coordinate with peers on related tasks.",
+		description: "Send a message to a comrade. Use this to coordinate with peers on related tasks.",
 		parameters: TeamMessageToolParamsSchema,
 		async execute(
 			_toolCallId,
@@ -375,7 +375,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				pendingDmTexts = [];
 				isStreaming = true;
 				pi.sendUserMessage([
-					{ type: "text", text: "You have received teammate message(s):" },
+					{ type: "text", text: "You have received comrade message(s):" },
 					{ type: "text", text },
 				]);
 				return;
