@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +6,6 @@ import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { TEAM_MAILBOX_NS } from "./protocol.js";
-import { cleanupTeamDir } from "./cleanup.js";
 import { listTasks, unassignTasksForAgent, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
@@ -26,6 +24,13 @@ import {
 	handleTeamSteerCommand,
 } from "./leader-messaging-commands.js";
 import { handleTeamEnvCommand, handleTeamIdCommand, handleTeamListCommand } from "./leader-info-commands.js";
+import {
+	handleTeamCleanupCommand,
+	handleTeamDelegateCommand,
+	handleTeamKillCommand,
+	handleTeamShutdownCommand,
+	handleTeamStopCommand,
+} from "./leader-lifecycle-commands.js";
 
 
 type ContextMode = "fresh" | "branch";
@@ -493,164 +498,37 @@ export function runLeader(pi: ExtensionAPI): void {
 				}
 
 				case "cleanup": {
-					const flags = rest.filter((a) => a.startsWith("--"));
-					const argsOnly = rest.filter((a) => !a.startsWith("--"));
-					const force = flags.includes("--force");
-
-					const unknownFlags = flags.filter((f) => f !== "--force");
-					if (unknownFlags.length) {
-						ctx.ui.notify(`Unknown flag(s): ${unknownFlags.join(", ")}`, "error");
-						return;
-					}
-					if (argsOnly.length) {
-						ctx.ui.notify("Usage: /team cleanup [--force]", "error");
-						return;
-					}
-
-					const teamId = ctx.sessionManager.getSessionId();
-					const teamsRoot = getTeamsRootDir();
-					const teamDir = getTeamDir(teamId);
-
-					if (!force && teammates.size > 0) {
-						ctx.ui.notify(
-							`Refusing to cleanup while ${teammates.size} RPC teammate(s) are running. Stop them first or use --force.`,
-							"error",
-						);
-						return;
-					}
-
-					await refreshTasks();
-					const inProgress = tasks.filter((t) => t.status === "in_progress");
-					if (!force && inProgress.length > 0) {
-						ctx.ui.notify(
-							`Refusing to cleanup with ${inProgress.length} in_progress task(s). Complete/unassign them first or use --force.`,
-							"error",
-						);
-						return;
-					}
-
-					if (!force) {
-						// Only prompt in interactive TTY mode. In RPC mode, confirm() would require
-						// the host to send extension_ui_response messages.
-						if (process.stdout.isTTY && process.stdin.isTTY) {
-							const ok = await ctx.ui.confirm(
-								"Cleanup team",
-								[
-									"Delete ALL team artifacts for this session?",
-									"",
-									`teamId: ${teamId}`,
-									`teamDir: ${teamDir}`,
-									`tasks: ${tasks.length} (in_progress: ${inProgress.length})`,
-								].join("\n"),
-							);
-							if (!ok) return;
-						} else {
-							ctx.ui.notify("Refusing to cleanup in non-interactive mode without --force", "error");
-							return;
-						}
-					}
-
-					try {
-						await cleanupTeamDir(teamsRoot, teamDir);
-					} catch (err) {
-						ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
-						return;
-					}
-
-					ctx.ui.notify(`Cleaned up team directory: ${teamDir}`, "warning");
-					await refreshTasks();
-					renderWidget();
+					await handleTeamCleanupCommand({
+						ctx,
+						rest,
+						teammates,
+						refreshTasks,
+						getTasks: () => tasks,
+						renderWidget,
+					});
 					return;
 				}
 
 				case "delegate": {
-					const arg = rest[0];
-					if (arg === "on") delegateMode = true;
-					else if (arg === "off") delegateMode = false;
-					else delegateMode = !delegateMode;
-					ctx.ui.notify(`Delegate mode ${delegateMode ? "ON" : "OFF"}`, "info");
-					renderWidget();
+					await handleTeamDelegateCommand({
+						ctx,
+						rest,
+						getDelegateMode: () => delegateMode,
+						setDelegateMode: (next) => {
+							delegateMode = next;
+						},
+						renderWidget,
+					});
 					return;
 				}
 
 				case "shutdown": {
-					const nameRaw = rest[0];
-
-					// /team shutdown <name> [reason...] = request graceful worker shutdown via mailbox
-					if (nameRaw) {
-						const name = sanitizeName(nameRaw);
-						const reason = rest.slice(1).join(" ").trim() || undefined;
-
-						const teamId = ctx.sessionManager.getSessionId();
-						const teamDir = getTeamDir(teamId);
-
-						const requestId = randomUUID();
-						const ts = new Date().toISOString();
-						const payload: {
-							type: "shutdown_request";
-							requestId: string;
-							from: "team-lead";
-							timestamp: string;
-							reason?: string;
-						} = {
-							type: "shutdown_request",
-							requestId,
-							from: "team-lead",
-							timestamp: ts,
-							...(reason ? { reason } : {}),
-						};
-
-						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-							from: "team-lead",
-							text: JSON.stringify(payload),
-							timestamp: ts,
-						});
-
-						// Best-effort: record in member metadata (if present).
-						void setMemberStatus(teamDir, name, "online", {
-							meta: {
-								shutdownRequestedAt: ts,
-								shutdownRequestId: requestId,
-								...(reason ? { shutdownReason: reason } : {}),
-							},
-						});
-
-						ctx.ui.notify(`Shutdown requested for ${name}`, "info");
-
-						// Optional fallback for RPC teammates: force stop if it doesn't exit.
-						const t = teammates.get(name);
-						if (t) {
-							setTimeout(() => {
-								if (currentCtx?.sessionManager.getSessionId() !== teamId) return;
-								if (t.status === "stopped" || t.status === "error") return;
-								void (async () => {
-									try {
-										await t.stop();
-										await setMemberStatus(teamDir, name, "offline", {
-											meta: { shutdownFallback: true, shutdownRequestId: requestId },
-										});
-										currentCtx?.ui.notify(`Shutdown timeout; killed ${name}`, "warning");
-									} catch {
-										// ignore
-									}
-								})();
-							}, 10_000);
-						}
-
-						return;
-					}
-
-					// /team shutdown (no args) = shutdown leader + all teammates
-					// Only prompt in interactive TTY mode. In RPC mode, confirm() would require
-					// the host to send extension_ui_response messages.
-					if (process.stdout.isTTY && process.stdin.isTTY) {
-						const ok = await ctx.ui.confirm("Shutdown", "Exit pi and stop all teammates?");
-						if (!ok) return;
-					}
-					// In RPC mode, shutdown is deferred until the next input line is handled.
-					// Teammates are stopped in the session_shutdown handler.
-					ctx.ui.notify("Shutdown requested", "info");
-					ctx.shutdown();
+					await handleTeamShutdownCommand({
+						ctx,
+						rest,
+						teammates,
+						getCurrentCtx: () => currentCtx,
+					});
 					return;
 				}
 
@@ -680,75 +558,26 @@ export function runLeader(pi: ExtensionAPI): void {
 				}
 
 				case "stop": {
-					const nameRaw = rest[0];
-					const reason = rest.slice(1).join(" ").trim();
-					if (!nameRaw) {
-						ctx.ui.notify("Usage: /team stop <name> [reason...]", "error");
-						return;
-					}
-					const name = sanitizeName(nameRaw);
-
-					const teamId = ctx.sessionManager.getSessionId();
-					const teamDir = getTeamDir(teamId);
-
-					// Best-effort: include current in-progress task id (if any).
-					await refreshTasks();
-					const active = tasks.find((x) => x.owner === name && x.status === "in_progress");
-					const taskId = active?.id;
-
-					const ts = new Date().toISOString();
-					await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-						from: "team-lead",
-						text: JSON.stringify({
-							type: "abort_request",
-							requestId: randomUUID(),
-							from: "team-lead",
-							taskId,
-							reason: reason || undefined,
-							timestamp: ts,
-						}),
-						timestamp: ts,
+					await handleTeamStopCommand({
+						ctx,
+						rest,
+						teammates,
+						refreshTasks,
+						getTasks: () => tasks,
+						renderWidget,
 					});
-
-					const t = teammates.get(name);
-					if (t) {
-						// Fast-path for RPC teammates.
-						await t.abort();
-					}
-
-					ctx.ui.notify(
-						`Abort requested for ${name}${taskId ? ` (task #${taskId})` : ""}${t ? "" : " (mailbox only)"}`,
-						"warning",
-					);
-					renderWidget();
 					return;
 				}
 
 				case "kill": {
-					const nameRaw = rest[0];
-					if (!nameRaw) {
-						ctx.ui.notify("Usage: /team kill <name>", "error");
-						return;
-					}
-					const name = sanitizeName(nameRaw);
-					const t = teammates.get(name);
-					if (!t) {
-						ctx.ui.notify(`Unknown teammate: ${name}`, "error");
-						return;
-					}
-
-					await t.stop();
-					teammates.delete(name);
-
-					const teamId = ctx.sessionManager.getSessionId();
-					const teamDir = getTeamDir(teamId);
-					const effectiveTlId = taskListId ?? teamId;
-					await unassignTasksForAgent(teamDir, effectiveTlId, name, `Killed teammate '${name}'`);
-					await setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
-
-					ctx.ui.notify(`Killed teammate ${name}`, "warning");
-					await refreshTasks();
-					renderWidget();
+					await handleTeamKillCommand({
+						ctx,
+						rest,
+						teammates,
+						taskListId,
+						refreshTasks,
+						renderWidget,
+					});
 					return;
 				}
 
