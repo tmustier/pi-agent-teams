@@ -20,7 +20,13 @@ export async function pollLeaderInbox(opts: {
 }): Promise<void> {
 	const { ctx, teamId, teamDir, taskListId, pendingPlanApprovals } = opts;
 
-	const msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "team-lead");
+	let msgs: Awaited<ReturnType<typeof popUnreadMessages>>;
+	try {
+		msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "team-lead");
+	} catch (err: unknown) {
+		ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
+		return;
+	}
 	if (!msgs.length) return;
 
 	for (const m of msgs) {

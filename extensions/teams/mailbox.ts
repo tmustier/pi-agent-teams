@@ -27,6 +27,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null;
 }
 
+function isLockTimeoutError(err: unknown): err is Error {
+	return err instanceof Error && err.message.startsWith("Timeout acquiring lock:");
+}
+
 function coerceMailboxMessage(v: unknown): MailboxMessage | null {
 	if (!isRecord(v)) return null;
 	if (typeof v.from !== "string") return null;
@@ -94,27 +98,34 @@ export async function popUnreadMessages(teamDir: string, namespace: string, agen
 
 	await ensureDir(path.dirname(inboxPath));
 
-	return await withLock(
-		lockPath,
-		async () => {
-			const arr = (await readJsonArray(inboxPath))
-				.map(coerceMailboxMessage)
-				.filter((m): m is MailboxMessage => m !== null);
-			if (arr.length === 0) return [];
+	try {
+		return await withLock(
+			lockPath,
+			async () => {
+				const arr = (await readJsonArray(inboxPath))
+					.map(coerceMailboxMessage)
+					.filter((m): m is MailboxMessage => m !== null);
+				if (arr.length === 0) return [];
 
-			const unread: MailboxMessage[] = [];
-			const updated = arr.map((m) => {
-				if (!m.read) {
-					const next = { ...m, read: true };
-					unread.push(next);
-					return next;
-				}
-				return m;
-			});
+				const unread: MailboxMessage[] = [];
+				const updated = arr.map((m) => {
+					if (!m.read) {
+						const next = { ...m, read: true };
+						unread.push(next);
+						return next;
+					}
+					return m;
+				});
 
-			if (unread.length) await writeJsonAtomic(inboxPath, updated);
-			return unread;
-		},
-		{ label: `mailbox:pop:${namespace}:${agentName}` },
-	);
+				if (unread.length) await writeJsonAtomic(inboxPath, updated);
+				return unread;
+			},
+			{ label: `mailbox:pop:${namespace}:${agentName}` },
+		);
+	} catch (err: unknown) {
+		// In practice this can happen if a previous process crashed and left a non-stale
+		// lockfile behind. Treat as transient and try again on the next poll tick.
+		if (isLockTimeoutError(err)) return [];
+		throw err;
+	}
 }
