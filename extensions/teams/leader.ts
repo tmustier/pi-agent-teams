@@ -579,6 +579,15 @@ export function runLeader(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("team-widget", {
+		description: "Teams: open interactive widget panel (alias for /team widget)",
+		handler: async (_args, ctx) => {
+			currentCtx = ctx;
+			currentTeamId = ctx.sessionManager.getSessionId();
+			await openWidget(ctx);
+		},
+	});
+
 	pi.registerCommand("swarm", {
 		description: "Start a team of agents to work on a task",
 		handler: async (args, _ctx) => {
