@@ -216,8 +216,10 @@ export function runLeader(pi: ExtensionAPI): void {
 		style = teamConfig.style ?? style;
 	};
 
+	let widgetSuppressed = false;
+
 	const renderWidget = () => {
-		if (!currentCtx) return;
+		if (!currentCtx || widgetSuppressed) return;
 		// Component widget (more informative + styled). Re-setting it is also our "refresh" trigger.
 		currentCtx.ui.setWidget("pi-teams", widgetFactory);
 	};
@@ -697,7 +699,14 @@ export function runLeader(pi: ExtensionAPI): void {
 							void setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
 							void refreshTasks();
 						},
-						restoreWidget: renderWidget,
+						suppressWidget() {
+						widgetSuppressed = true;
+						ctx.ui.setWidget("pi-teams", undefined);
+					},
+					restoreWidget() {
+						widgetSuppressed = false;
+						renderWidget();
+					},
 					});
 					return;
 				}

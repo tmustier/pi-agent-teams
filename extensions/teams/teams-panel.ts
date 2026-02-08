@@ -17,6 +17,7 @@ export interface InteractiveWidgetDeps {
 	sendMessage(name: string, message: string): Promise<void>;
 	abortComrade(name: string): void;
 	killComrade(name: string): void;
+	suppressWidget(): void;
 	restoreWidget(): void;
 }
 
@@ -126,7 +127,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 	}
 
 	// Hide persistent widget while interactive one is open.
-	ctx.ui.setWidget("pi-teams", undefined);
+	deps.suppressWidget();
 
 	try {
 		await ctx.ui.custom<void>(
@@ -581,15 +582,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					},
 				};
 			},
-			{
-				overlay: true,
-				overlayOptions: {
-					anchor: "bottom-center",
-					width: "100%",
-					maxHeight: "60%",
-					margin: 0,
-				},
-			},
+			{},
 		);
 	} finally {
 		deps.restoreWidget();
