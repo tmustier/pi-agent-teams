@@ -515,6 +515,82 @@ export function runLeader(pi: ExtensionAPI): void {
 		renderWidget,
 	});
 
+	const openWidget = async (ctx: ExtensionCommandContext) => {
+		const teamId = ctx.sessionManager.getSessionId();
+		const teamDir = getTeamDir(teamId);
+		const effectiveTlId = taskListId ?? teamId;
+		const leadName = teamConfig?.leadName ?? "team-lead";
+		const strings = getTeamsStrings(style);
+
+		await openInteractiveWidget(ctx, {
+			getTeammates: () => teammates,
+			getTracker: () => tracker,
+			getTasks: () => tasks,
+			getTeamConfig: () => teamConfig,
+			getStyle: () => style,
+			isDelegateMode: () => delegateMode,
+			async sendMessage(name: string, message: string) {
+				const rpc = teammates.get(name);
+				if (rpc) {
+					if (rpc.status === "streaming") await rpc.followUp(message);
+					else await rpc.prompt(message);
+					return;
+				}
+
+				await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
+					from: leadName,
+					text: message,
+					timestamp: new Date().toISOString(),
+				});
+			},
+			abortComrade(name: string) {
+				const rpc = teammates.get(name);
+				if (rpc) void rpc.abort();
+			},
+			killComrade(name: string) {
+				const rpc = teammates.get(name);
+				if (!rpc) return;
+
+				void rpc.stop();
+				teammates.delete(name);
+
+				const displayName = formatMemberDisplayName(style, name);
+				void unassignTasksForAgent(teamDir, effectiveTlId, name, `${displayName} ${strings.killedVerb}`);
+				void setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
+				void refreshTasks();
+			},
+			suppressWidget() {
+				widgetSuppressed = true;
+				ctx.ui.setWidget("pi-teams", undefined);
+			},
+			restoreWidget() {
+				widgetSuppressed = false;
+				renderWidget();
+			},
+		});
+	};
+
+	pi.registerCommand("tw", {
+		description: "Teams: open interactive widget panel",
+		handler: async (_args, ctx) => {
+			currentCtx = ctx;
+			currentTeamId = ctx.sessionManager.getSessionId();
+			await openWidget(ctx);
+		},
+	});
+
+	pi.registerCommand("swarm", {
+		description: "Start a team of agents to work on a task",
+		handler: async (args, _ctx) => {
+			const task = args.trim();
+			if (!task) {
+				pi.sendUserMessage("Use your /team commands to spawn a team of agents and coordinate them to complete my next request. Ask me what I'd like done.");
+				return;
+			}
+			pi.sendUserMessage(`Use your /team commands to spawn a team of agents and coordinate them to complete this task:\n\n${task}`);
+		},
+	});
+
 	pi.registerCommand("team", {
 		description: "Teams: spawn comrades + coordinate via Claude-like task list",
 		handler: async (args, ctx) => {
@@ -656,58 +732,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 				case "panel":
 				case "widget": {
-					const teamId = ctx.sessionManager.getSessionId();
-					const teamDir = getTeamDir(teamId);
-					const effectiveTlId = taskListId ?? teamId;
-					const leadName = teamConfig?.leadName ?? "team-lead";
-					const strings = getTeamsStrings(style);
-
-					await openInteractiveWidget(ctx, {
-						getTeammates: () => teammates,
-						getTracker: () => tracker,
-						getTasks: () => tasks,
-						getTeamConfig: () => teamConfig,
-						getStyle: () => style,
-						isDelegateMode: () => delegateMode,
-						async sendMessage(name: string, message: string) {
-							const rpc = teammates.get(name);
-							if (rpc) {
-								if (rpc.status === "streaming") await rpc.followUp(message);
-								else await rpc.prompt(message);
-								return;
-							}
-
-							await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-								from: leadName,
-								text: message,
-								timestamp: new Date().toISOString(),
-							});
-						},
-						abortComrade(name: string) {
-							const rpc = teammates.get(name);
-							if (rpc) void rpc.abort();
-						},
-						killComrade(name: string) {
-							const rpc = teammates.get(name);
-							if (!rpc) return;
-
-							void rpc.stop();
-							teammates.delete(name);
-
-							const displayName = formatMemberDisplayName(style, name);
-							void unassignTasksForAgent(teamDir, effectiveTlId, name, `${displayName} ${strings.killedVerb}`);
-							void setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
-							void refreshTasks();
-						},
-						suppressWidget() {
-						widgetSuppressed = true;
-						ctx.ui.setWidget("pi-teams", undefined);
-					},
-					restoreWidget() {
-						widgetSuppressed = false;
-						renderWidget();
-					},
-					});
+					await openWidget(ctx);
 					return;
 				}
 

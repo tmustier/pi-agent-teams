@@ -57,9 +57,16 @@ Verify with `/team id` — it should print the current team info.
 
 ## Quick start
 
-```
-# In a Pi session with the extension loaded:
+The fastest way to get going is `/swarm`:
 
+```
+/swarm build the auth module               # agent spawns a team and coordinates the work
+/swarm                                     # agent asks you what to do, then swarms on it
+```
+
+Or drive it manually:
+
+```
 /team spawn alice                          # spawn a teammate (fresh session, shared workspace)
 /team spawn bob branch worktree            # spawn with leader context + isolated worktree
 
@@ -68,6 +75,8 @@ Verify with `/team id` — it should print the current team info.
 
 /team dm alice Check the edge cases too    # direct message
 /team broadcast Wrapping up soon           # message everyone
+
+/tw                                        # open the interactive widget panel
 
 /team shutdown alice                       # graceful shutdown (handshake)
 /team cleanup                              # remove team artifacts when done
@@ -90,15 +99,22 @@ Or let the model drive it with the delegate tool:
 
 ## Commands
 
-All commands live under `/team`.
+### Shortcuts
 
-### Teammates
+| Command | Description |
+| --- | --- |
+| `/swarm [task]` | Tell the agent to spawn a team and work on a task |
+| `/tw` | Open the interactive widget panel |
+
+### Team management
+
+All management commands live under `/team`.
 
 | Command | Description |
 | --- | --- |
 | `/team spawn <name> [fresh\|branch] [shared\|worktree]` | Start a teammate |
 | `/team list` | List teammates and their status |
-| `/team panel` | Interactive overlay with teammate details |
+| `/team panel` | Interactive widget panel (same as `/tw`) |
 | `/team style <normal\|soviet>` | Set UI style (normal/soviet) |
 | `/team send <name> <msg>` | Send a prompt over RPC |
 | `/team steer <name> <msg>` | Redirect an in-flight run |
