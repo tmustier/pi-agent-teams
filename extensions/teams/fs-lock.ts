@@ -22,10 +22,12 @@ export interface LockOptions {
 export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, opts: LockOptions = {}): Promise<T> {
 	const timeoutMs = opts.timeoutMs ?? 10_000;
 	const staleMs = opts.staleMs ?? 60_000;
-	const pollMs = opts.pollMs ?? 50;
+	const basePollMs = opts.pollMs ?? 50;
+	const maxPollMs = Math.max(basePollMs, 1_000);
 	const start = Date.now();
 
 	let fd: number | null = null;
+	let attempt = 0;
 
 	while (fd === null) {
 		try {
@@ -45,16 +47,26 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 				const age = Date.now() - st.mtimeMs;
 				if (age > staleMs) {
 					fs.unlinkSync(lockFilePath);
+					attempt = 0;
 					continue;
 				}
 			} catch {
 				// ignore: stat/unlink failures fall through to wait
 			}
 
-			if (Date.now() - start > timeoutMs) {
+			const elapsedMs = Date.now() - start;
+			if (elapsedMs > timeoutMs) {
 				throw new Error(`Timeout acquiring lock: ${lockFilePath}`);
 			}
-			await sleep(pollMs);
+
+			attempt += 1;
+			const expBackoff = Math.min(maxPollMs, basePollMs * 2 ** Math.min(attempt, 6));
+			const jitterFactor = 0.5 + Math.random(); // [0.5, 1.5)
+			const jitteredBackoff = Math.min(maxPollMs, Math.round(expBackoff * jitterFactor));
+
+			const remainingMs = timeoutMs - elapsedMs;
+			const sleepMs = Math.max(1, Math.min(remainingMs, jitteredBackoff));
+			await sleep(sleepMs);
 		}
 	}
 

@@ -328,7 +328,8 @@ export function runWorker(pi: ExtensionAPI): void {
 				// ignore polling errors
 			}
 
-			await sleep(350);
+			// Add a little jitter to avoid all workers polling/claiming in lock-step.
+			await sleep(350 + Math.floor(Math.random() * 200));
 		}
 	};
 
@@ -382,6 +383,10 @@ export function runWorker(pi: ExtensionAPI): void {
 
 			// 3) Auto-claim
 			if (autoClaim) {
+				// Small randomized delay improves fairness (reduces one fast worker hogging tasks)
+				// and reduces lock contention when many workers become idle simultaneously.
+				await sleep(Math.floor(Math.random() * 250));
+
 				const claimed = await claimNextAvailableTask(teamDir, taskListId, agentName, { checkAgentBusy: true });
 				if (claimed) {
 					currentTaskId = claimed.id;
