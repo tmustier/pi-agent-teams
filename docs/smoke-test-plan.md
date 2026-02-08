@@ -111,7 +111,8 @@ To test the worker role directly:
 PI_TEAMS_WORKER=1 \
 PI_TEAMS_TEAM_ID=test-team \
 PI_TEAMS_AGENT_NAME=agent1 \
-PI_TEAMS_LEAD_NAME=chairman \
+PI_TEAMS_LEAD_NAME=team-lead \
+PI_TEAMS_STYLE=normal \
 pi --no-extensions -e extensions/teams/index.ts --mode rpc
 ```
 
