@@ -3,9 +3,10 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
-import { sanitizeName } from "./names.js";
+import { pickAgentNames, pickComradeNames, sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
 import { ensureTeamConfig } from "./team-config.js";
+import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName } from "./teams-style.js";
 import { createTask, type TeamTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 
@@ -110,7 +111,13 @@ export function registerTeamsTool(opts: {
 			const teamId = ctx.sessionManager.getSessionId();
 			const teamDir = getTeamDir(teamId);
 			const taskListId = getTaskListId();
-			await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "chairman" });
+			const cfg = await ensureTeamConfig(teamDir, {
+				teamId,
+				taskListId: taskListId ?? teamId,
+				leadName: "team-lead",
+				style: getTeamsStyleFromEnv(),
+			});
+			const style: TeamsStyle = cfg.style ?? getTeamsStyleFromEnv();
 
 			let teammateNames: string[] = [];
 			const explicit = params.teammates;
@@ -125,7 +132,8 @@ export function registerTeamsTool(opts: {
 			if (teammateNames.length === 0) {
 				const maxTeammates = Math.max(1, Math.min(16, params.maxTeammates ?? 4));
 				const count = Math.min(maxTeammates, inputTasks.length);
-				teammateNames = Array.from({ length: count }, (_, i) => `agent${i + 1}`);
+				const taken = new Set(teammates.keys());
+				teammateNames = style === "soviet" ? pickComradeNames(count, taken) : pickAgentNames(count, taken);
 			}
 
 			const spawned: string[] = [];
@@ -189,8 +197,8 @@ export function registerTeamsTool(opts: {
 				const task = await createTask(teamDir, effectiveTlId, { subject, description, owner: assignee });
 
 				await writeToMailbox(teamDir, effectiveTlId, assignee, {
-					from: "chairman",
-					text: JSON.stringify(taskAssignmentPayload(task, "chairman")),
+					from: cfg.leadName,
+					text: JSON.stringify(taskAssignmentPayload(task, cfg.leadName)),
 					timestamp: new Date().toISOString(),
 				});
 
@@ -201,10 +209,12 @@ export function registerTeamsTool(opts: {
 			void refreshTasks().finally(renderWidget);
 
 			const lines: string[] = [];
-			if (spawned.length) lines.push(`Spawned: ${spawned.join(", ")}`);
+			if (spawned.length) {
+				lines.push(`Spawned: ${spawned.map((n) => formatMemberDisplayName(style, n)).join(", ")}`);
+			}
 			lines.push(`Delegated ${assignments.length} task(s):`);
 			for (const a of assignments) {
-				lines.push(`- #${a.taskId} → ${a.assignee}: ${a.subject}`);
+				lines.push(`- #${a.taskId} → ${formatMemberDisplayName(style, a.assignee)}: ${a.subject}`);
 			}
 			if (warnings.length) {
 				lines.push("\nWarnings:");

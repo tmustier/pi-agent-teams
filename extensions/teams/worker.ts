@@ -4,6 +4,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
+import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import {
 	TEAM_MAILBOX_NS,
 	isAbortRequestMessage,
@@ -36,6 +37,7 @@ function teamDirFromEnv(): {
 	taskListId: string;
 	agentName: string;
 	leadName: string;
+	style: TeamsStyle;
 	autoClaim: boolean;
 } | null {
 	const teamId = process.env.PI_TEAMS_TEAM_ID;
@@ -44,7 +46,8 @@ function teamDirFromEnv(): {
 
 	const agentName = sanitizeName(agentNameRaw);
 	const taskListId = process.env.PI_TEAMS_TASK_LIST_ID ?? teamId;
-	const leadName = sanitizeName(process.env.PI_TEAMS_LEAD_NAME ?? "chairman");
+	const style = getTeamsStyleFromEnv(process.env);
+	const leadName = sanitizeName(process.env.PI_TEAMS_LEAD_NAME ?? "team-lead");
 	const autoClaim = (process.env.PI_TEAMS_AUTO_CLAIM ?? "1") === "1";
 
 	return {
@@ -53,6 +56,7 @@ function teamDirFromEnv(): {
 		taskListId,
 		agentName,
 		leadName,
+		style,
 		autoClaim,
 	};
 }
@@ -94,12 +98,15 @@ function extractLastAssistantText(messages: AgentMessage[]): string {
 	return "";
 }
 
-function buildTaskPrompt(agentName: string, task: TeamTask, planOnly = false): string {
+function buildTaskPrompt(style: TeamsStyle, agentName: string, task: TeamTask, planOnly = false): string {
+	const strings = getTeamsStrings(style);
 	const footer = planOnly
 		? "Produce a detailed implementation plan only. Do NOT make any changes or implement anything yet. Your plan will be reviewed before you can proceed."
 		: "Do the work now. When finished, reply with a concise summary and any key outputs.";
+
+	const actor = style === "soviet" ? strings.memberTitle.toLowerCase() : "teammate";
 	return [
-		`You are comrade '${agentName}'.`,
+		`You are ${actor} '${agentName}'.`,
 		`You have been assigned task #${task.id}.`,
 		`Subject: ${task.subject}`,
 		"",
@@ -114,7 +121,7 @@ export function runWorker(pi: ExtensionAPI): void {
 	const env = teamDirFromEnv();
 	if (!env) return;
 
-	const { teamId, teamDir, taskListId, agentName, leadName, autoClaim } = env;
+	const { teamId, teamDir, taskListId, agentName, leadName, style, autoClaim } = env;
 
 	const TeamMessageToolParamsSchema = Type.Object({
 		recipient: Type.String({ description: "Name of the comrade to message" }),
@@ -363,7 +370,7 @@ export function runWorker(pi: ExtensionAPI): void {
 
 				currentTaskId = taskId;
 				isStreaming = true; // optimistic; agent_start will follow
-				pi.sendUserMessage(buildTaskPrompt(agentName, task, planMode && !planApproved));
+				pi.sendUserMessage(buildTaskPrompt(style, agentName, task, planMode && !planApproved));
 				pendingTaskAssignments = [...requeue, ...pendingTaskAssignments];
 				return;
 			}
@@ -391,7 +398,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				if (claimed) {
 					currentTaskId = claimed.id;
 					isStreaming = true;
-					pi.sendUserMessage(buildTaskPrompt(agentName, claimed, planMode && !planApproved));
+					pi.sendUserMessage(buildTaskPrompt(style, agentName, claimed, planMode && !planApproved));
 					return;
 				}
 			}
@@ -449,7 +456,7 @@ export function runWorker(pi: ExtensionAPI): void {
 
 		// Register ourselves in the shared team config so manual tmux workers are discoverable.
 		try {
-			const cfg = await ensureTeamConfig(teamDir, { teamId, taskListId, leadName });
+			const cfg = await ensureTeamConfig(teamDir, { teamId, taskListId, leadName, style });
 			const now = new Date().toISOString();
 			if (!cfg.members.some((m) => m.name === agentName)) {
 				await upsertMember(teamDir, {

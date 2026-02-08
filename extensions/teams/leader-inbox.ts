@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import {
@@ -11,18 +11,24 @@ import {
 } from "./protocol.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
 
+import type { TeamsStyle } from "./teams-style.js";
+import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+
 export async function pollLeaderInbox(opts: {
-	ctx: ExtensionCommandContext;
+	ctx: ExtensionContext;
 	teamId: string;
 	teamDir: string;
 	taskListId: string;
+	leadName: string;
+	style: TeamsStyle;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 }): Promise<void> {
-	const { ctx, teamId, teamDir, taskListId, pendingPlanApprovals } = opts;
+	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals } = opts;
+	const strings = getTeamsStrings(style);
 
 	let msgs: Awaited<ReturnType<typeof popUnreadMessages>>;
 	try {
-		msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "chairman");
+		msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, leadName);
 	} catch (err: unknown) {
 		ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
 		return;
@@ -36,7 +42,8 @@ export async function pollLeaderInbox(opts: {
 			const cfg = await ensureTeamConfig(teamDir, {
 				teamId,
 				taskListId,
-				leadName: "chairman",
+				leadName,
+				style,
 			});
 			if (!cfg.members.some((mm) => mm.name === name)) {
 				await upsertMember(teamDir, { name, role: "worker", status: "offline" });
@@ -48,7 +55,7 @@ export async function pollLeaderInbox(opts: {
 					shutdownApprovedAt: approved.timestamp ?? new Date().toISOString(),
 				},
 			});
-			ctx.ui.notify(`${name} approved shutdown`, "info");
+			ctx.ui.notify(`${formatMemberDisplayName(style, name)} shut down`, "info");
 			continue;
 		}
 
@@ -62,7 +69,7 @@ export async function pollLeaderInbox(opts: {
 					shutdownRejectedReason: rejected.reason,
 				},
 			});
-			ctx.ui.notify(`${name} rejected shutdown: ${rejected.reason}`, "warning");
+			ctx.ui.notify(`${formatMemberDisplayName(style, name)} refused shutdown: ${rejected.reason}`, "warning");
 			continue;
 		}
 
@@ -70,7 +77,7 @@ export async function pollLeaderInbox(opts: {
 		if (planReq) {
 			const name = sanitizeName(planReq.from);
 			const preview = planReq.plan.length > 500 ? planReq.plan.slice(0, 500) + "..." : planReq.plan;
-			ctx.ui.notify(`${name} requests plan approval:\n${preview}`, "info");
+			ctx.ui.notify(`${formatMemberDisplayName(style, name)} requests plan approval:\n${preview}`, "info");
 			pendingPlanApprovals.set(name, {
 				requestId: planReq.requestId,
 				name,
@@ -92,7 +99,8 @@ export async function pollLeaderInbox(opts: {
 				const cfg = await ensureTeamConfig(teamDir, {
 					teamId,
 					taskListId,
-					leadName: "chairman",
+					leadName,
+					style,
 				});
 				if (!cfg.members.some((mm) => mm.name === name)) {
 					await upsertMember(teamDir, { name, role: "worker", status: "offline" });
@@ -103,12 +111,13 @@ export async function pollLeaderInbox(opts: {
 				});
 				ctx.ui.notify(`${name} went offline (${idle.failureReason})`, "warning");
 			} else {
-				const desiredSessionName = `pi agent teams - comrade ${name}`;
+				const desiredSessionName = `pi agent teams - ${strings.memberTitle.toLowerCase()} ${name}`;
 
 				const cfg = await ensureTeamConfig(teamDir, {
 					teamId,
 					taskListId,
-					leadName: "chairman",
+					leadName,
+					style,
 				});
 
 				const member = cfg.members.find((mm) => mm.name === name);
@@ -136,11 +145,11 @@ export async function pollLeaderInbox(opts: {
 					try {
 						const ts = new Date().toISOString();
 						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-							from: "chairman",
+							from: leadName,
 							text: JSON.stringify({
 								type: "set_session_name",
 								name: desiredSessionName,
-								from: "chairman",
+								from: leadName,
 								timestamp: ts,
 							}),
 							timestamp: ts,

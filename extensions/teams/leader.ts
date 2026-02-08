@@ -12,8 +12,9 @@ import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type T
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { ensureWorktreeCwd } from "./worktree.js";
 import { ActivityTracker } from "./activity-tracker.js";
-import { openTeamsPanel } from "./teams-panel.js";
+import { openInteractiveWidget } from "./teams-panel.js";
 import { createTeamsWidget } from "./teams-widget.js";
+import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import { pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
 import { handleTeamTaskCommand } from "./leader-task-commands.js";
 import { handleTeamPlanCommand } from "./leader-plan-commands.js";
@@ -32,6 +33,7 @@ import {
 	handleTeamKillCommand,
 	handleTeamShutdownCommand,
 	handleTeamStopCommand,
+	handleTeamStyleCommand,
 } from "./leader-lifecycle-commands.js";
 
 
@@ -135,7 +137,7 @@ export function runLeader(pi: ExtensionAPI): void {
 	const teammates = new Map<string, TeammateRpc>();
 	const tracker = new ActivityTracker();
 	const teammateEventUnsubs = new Map<string, () => void>();
-	let currentCtx: ExtensionCommandContext | null = null;
+	let currentCtx: ExtensionContext | null = null;
 	let currentTeamId: string | null = null;
 	let tasks: TeamTask[] = [];
 	let teamConfig: TeamConfig | null = null;
@@ -151,6 +153,7 @@ export function runLeader(pi: ExtensionAPI): void {
 	let inboxInFlight = false;
 	let isStopping = false;
 	let delegateMode = process.env.PI_TEAMS_DELEGATE_MODE === "1";
+	let style: TeamsStyle = getTeamsStyleFromEnv();
 
 	const stopLoops = () => {
 		if (refreshTimer) clearInterval(refreshTimer);
@@ -159,7 +162,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		inboxTimer = null;
 	};
 
-	const stopAllTeammates = async (ctx: ExtensionCommandContext, reason: string) => {
+	const stopAllTeammates = async (ctx: ExtensionContext, reason: string) => {
 		if (teammates.size === 0) return;
 		isStopping = true;
 		try {
@@ -191,6 +194,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		getTracker: () => tracker,
 		getTasks: () => tasks,
 		getTeamConfig: () => teamConfig,
+		getStyle: () => style,
 		isDelegateMode: () => delegateMode,
 	});
 
@@ -206,8 +210,10 @@ export function runLeader(pi: ExtensionAPI): void {
 			(await ensureTeamConfig(teamDir, {
 				teamId: currentTeamId,
 				taskListId: effectiveTaskListId,
-				leadName: "chairman",
+				leadName: "team-lead",
+				style,
 			}));
+		style = teamConfig.style ?? style;
 	};
 
 	const renderWidget = () => {
@@ -238,7 +244,10 @@ export function runLeader(pi: ExtensionAPI): void {
 
 		const name = sanitizeName(opts.name);
 		if (!name) return { ok: false, error: "Missing comrade name" };
-		if (teammates.has(name)) return { ok: false, error: `Comrade already exists: ${name}` };
+		if (teammates.has(name)) {
+			const strings = getTeamsStrings(style);
+			return { ok: false, error: `${formatMemberDisplayName(style, name)} already exists (${strings.teamNoun})` };
+		}
 
 		const teamId = ctx.sessionManager.getSessionId();
 		const teamDir = getTeamDir(teamId);
@@ -267,7 +276,12 @@ export function runLeader(pi: ExtensionAPI): void {
 
 			if (currentCtx?.sessionManager.getSessionId() !== leaderSessionId) return;
 			const effectiveTlId = taskListId ?? leaderSessionId;
-			void unassignTasksForAgent(teamDir, effectiveTlId, name, `Comrade '${name}' exited`).finally(() => {
+			void unassignTasksForAgent(
+				teamDir,
+				effectiveTlId,
+				name,
+				`${formatMemberDisplayName(style, name)} ${getTeamsStrings(style).leftVerb}`,
+			).finally(() => {
 				void refreshTasks().finally(renderWidget);
 			});
 			void setMemberStatus(teamDir, name, "offline", { meta: { exitCode: code ?? undefined } });
@@ -291,10 +305,11 @@ export function runLeader(pi: ExtensionAPI): void {
 			argsForChild.push("--no-extensions", "-e", teamsEntry);
 		}
 
-		argsForChild.push(
-			"--append-system-prompt",
-			`You are comrade '${name}'. You collaborate with the chairman. Prefer working from the shared task list.\n`,
-		);
+		const systemAppend =
+			style === "soviet"
+				? `You are comrade '${name}'. You collaborate with the chairman. Prefer working from the shared task list.\n`
+				: `You are teammate '${name}'. You collaborate with the team leader. Prefer working from the shared task list.\n`;
+		argsForChild.push("--append-system-prompt", systemAppend);
 
 		const autoClaim = (process.env.PI_TEAMS_DEFAULT_AUTO_CLAIM ?? "1") === "1";
 
@@ -314,7 +329,8 @@ export function runLeader(pi: ExtensionAPI): void {
 					PI_TEAMS_TEAM_ID: teamId,
 					PI_TEAMS_TASK_LIST_ID: taskListId ?? teamId,
 					PI_TEAMS_AGENT_NAME: name,
-					PI_TEAMS_LEAD_NAME: "chairman",
+					PI_TEAMS_LEAD_NAME: "team-lead",
+					PI_TEAMS_STYLE: style,
 					PI_TEAMS_AUTO_CLAIM: autoClaim ? "1" : "0",
 					...(opts.planRequired ? { PI_TEAMS_PLAN_REQUIRED: "1" } : {}),
 				},
@@ -325,7 +341,8 @@ export function runLeader(pi: ExtensionAPI): void {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 
-		const sessionName = `pi agent teams - comrade ${name}`;
+		const strings = getTeamsStrings(style);
+		const sessionName = `pi agent teams - ${strings.memberTitle.toLowerCase()} ${name}`;
 
 		// Leader-driven session naming (so teammates are easy to spot in /resume).
 		try {
@@ -338,15 +355,15 @@ export function runLeader(pi: ExtensionAPI): void {
 		try {
 			const ts = new Date().toISOString();
 			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-				from: "chairman",
-				text: JSON.stringify({ type: "set_session_name", name: sessionName, from: "chairman", timestamp: ts }),
+				from: "team-lead",
+				text: JSON.stringify({ type: "set_session_name", name: sessionName, from: "team-lead", timestamp: ts }),
 				timestamp: ts,
 			});
 		} catch {
 			// ignore
 		}
 
-		await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "chairman" });
+		await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "team-lead", style });
 		await upsertMember(teamDir, {
 			name,
 			role: "worker",
@@ -371,6 +388,8 @@ export function runLeader(pi: ExtensionAPI): void {
 			teamId: currentTeamId,
 			teamDir,
 			taskListId: effectiveTaskListId,
+			leadName: teamConfig?.leadName ?? "team-lead",
+			style,
 			pendingPlanApprovals,
 		});
 	};
@@ -384,7 +403,7 @@ export function runLeader(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		currentCtx = ctx as ExtensionCommandContext;
+		currentCtx = ctx;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
 		// Keep the task list aligned with the active session. If you want a shared namespace,
 		// use `/team task use <taskListId>` after switching.
@@ -394,7 +413,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
 			taskListId: taskListId,
-			leadName: "chairman",
+			leadName: "team-lead",
+			style,
 		});
 
 		await refreshTasks();
@@ -427,11 +447,15 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	pi.on("session_switch", async (_event, ctx) => {
 		if (currentCtx) {
-			await stopAllTeammates(currentCtx, "Stopped due to leader session switch");
+			const strings = getTeamsStrings(style);
+			await stopAllTeammates(
+				currentCtx,
+				style === "soviet" ? `The ${strings.teamNoun} is dissolved — leader moved on` : "Stopped due to session switch",
+			);
 		}
 		stopLoops();
 
-		currentCtx = ctx as ExtensionCommandContext;
+		currentCtx = ctx;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
 		// Keep the task list aligned with the active session. If you want a shared namespace,
 		// use `/team task use <taskListId>` after switching.
@@ -440,7 +464,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
 			taskListId: taskListId,
-			leadName: "chairman",
+			leadName: "team-lead",
+			style,
 		});
 
 		await refreshTasks();
@@ -474,7 +499,8 @@ export function runLeader(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async () => {
 		if (!currentCtx) return;
 		stopLoops();
-		await stopAllTeammates(currentCtx, "Stopped due to leader shutdown");
+		const strings = getTeamsStrings(style);
+		await stopAllTeammates(currentCtx, style === "soviet" ? `The ${strings.teamNoun} is over` : "Stopped due to leader shutdown");
 	});
 
 	registerTeamsTool({
@@ -566,6 +592,7 @@ export function runLeader(pi: ExtensionAPI): void {
 						refreshTasks,
 						getTasks: () => tasks,
 						renderWidget,
+						style,
 					});
 					return;
 				}
@@ -588,22 +615,81 @@ export function runLeader(pi: ExtensionAPI): void {
 						ctx,
 						rest,
 						teammates,
+						leadName: teamConfig?.leadName ?? "team-lead",
+						style,
 						getCurrentCtx: () => currentCtx,
 					});
 					return;
 				}
 
 				case "spawn": {
-					await handleTeamSpawnCommand({ ctx, rest, spawnTeammate });
+					await handleTeamSpawnCommand({ ctx, rest, teammates, style, spawnTeammate });
 					return;
 				}
 
-				case "panel": {
-					await openTeamsPanel(ctx, {
+				case "style": {
+					const teamId = ctx.sessionManager.getSessionId();
+					const teamDir = getTeamDir(teamId);
+					await handleTeamStyleCommand({
+						ctx,
+						rest,
+						teamDir,
+						getStyle: () => style,
+						setStyle: (next) => {
+							style = next;
+						},
+						refreshTasks,
+						renderWidget,
+					});
+					return;
+				}
+
+				case "panel":
+				case "widget": {
+					const teamId = ctx.sessionManager.getSessionId();
+					const teamDir = getTeamDir(teamId);
+					const effectiveTlId = taskListId ?? teamId;
+					const leadName = teamConfig?.leadName ?? "team-lead";
+					const strings = getTeamsStrings(style);
+
+					await openInteractiveWidget(ctx, {
 						getTeammates: () => teammates,
 						getTracker: () => tracker,
 						getTasks: () => tasks,
 						getTeamConfig: () => teamConfig,
+						getStyle: () => style,
+						isDelegateMode: () => delegateMode,
+						async sendMessage(name: string, message: string) {
+							const rpc = teammates.get(name);
+							if (rpc) {
+								if (rpc.status === "streaming") await rpc.followUp(message);
+								else await rpc.prompt(message);
+								return;
+							}
+
+							await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
+								from: leadName,
+								text: message,
+								timestamp: new Date().toISOString(),
+							});
+						},
+						abortComrade(name: string) {
+							const rpc = teammates.get(name);
+							if (rpc) void rpc.abort();
+						},
+						killComrade(name: string) {
+							const rpc = teammates.get(name);
+							if (!rpc) return;
+
+							void rpc.stop();
+							teammates.delete(name);
+
+							const displayName = formatMemberDisplayName(style, name);
+							void unassignTasksForAgent(teamDir, effectiveTlId, name, `${displayName} ${strings.killedVerb}`);
+							void setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
+							void refreshTasks();
+						},
+						restoreWidget: renderWidget,
 					});
 					return;
 				}
@@ -613,6 +699,7 @@ export function runLeader(pi: ExtensionAPI): void {
 						ctx,
 						rest,
 						teammates,
+						style,
 						renderWidget,
 					});
 					return;
@@ -623,6 +710,7 @@ export function runLeader(pi: ExtensionAPI): void {
 						ctx,
 						rest,
 						teammates,
+						style,
 						renderWidget,
 					});
 					return;
@@ -633,6 +721,8 @@ export function runLeader(pi: ExtensionAPI): void {
 						ctx,
 						rest,
 						teammates,
+						leadName: teamConfig?.leadName ?? "team-lead",
+						style,
 						refreshTasks,
 						getTasks: () => tasks,
 						renderWidget,
@@ -645,6 +735,8 @@ export function runLeader(pi: ExtensionAPI): void {
 						ctx,
 						rest,
 						teammates,
+						leadName: teamConfig?.leadName ?? "team-lead",
+						style,
 						taskListId,
 						refreshTasks,
 						renderWidget,
@@ -656,6 +748,8 @@ export function runLeader(pi: ExtensionAPI): void {
 					await handleTeamDmCommand({
 						ctx,
 						rest,
+						leadName: teamConfig?.leadName ?? "team-lead",
+						style,
 					});
 					return;
 				}
@@ -665,6 +759,8 @@ export function runLeader(pi: ExtensionAPI): void {
 						ctx,
 						rest,
 						teammates,
+						leadName: teamConfig?.leadName ?? "team-lead",
+						style,
 						refreshTasks,
 						getTasks: () => tasks,
 						getTaskListId: () => taskListId,

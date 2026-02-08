@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { withLock } from "./fs-lock.js";
 import { sanitizeName } from "./names.js";
+import type { TeamsStyle } from "./teams-style.js";
 
 export interface TeamMember {
 	name: string;
@@ -22,7 +23,10 @@ export interface TeamConfig {
 	teamId: string;
 	/** Task list namespace identifier (Claude-style: often teamName or parentSessionId) */
 	taskListId: string;
+	/** Internal leader agent id (mailbox name, member name, etc.) */
 	leadName: string;
+	/** Optional UI/UX style. If omitted, treat as "normal". */
+	style?: TeamsStyle;
 	createdAt: string;
 	updatedAt: string;
 	members: TeamMember[];
@@ -38,6 +42,10 @@ async function ensureDir(p: string): Promise<void> {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null;
+}
+
+function coerceStyle(v: unknown): TeamsStyle | undefined {
+	return v === "normal" || v === "soviet" ? v : undefined;
 }
 
 async function readJson(file: string): Promise<unknown | null> {
@@ -86,12 +94,14 @@ function coerceConfig(obj: unknown): TeamConfig | null {
 	if (typeof obj.updatedAt !== "string") return null;
 	if (!Array.isArray(obj.members)) return null;
 
+	const style = coerceStyle(obj.style);
 	const members = obj.members.map(coerceMember).filter((m): m is TeamMember => m !== null);
 	return {
 		version: 1,
 		teamId: obj.teamId,
 		taskListId: obj.taskListId,
 		leadName: sanitizeName(obj.leadName),
+		style,
 		createdAt: obj.createdAt,
 		updatedAt: obj.updatedAt,
 		members,
@@ -104,7 +114,10 @@ export async function loadTeamConfig(teamDir: string): Promise<TeamConfig | null
 	return coerceConfig(obj);
 }
 
-export async function ensureTeamConfig(teamDir: string, init: { teamId: string; taskListId: string; leadName: string }): Promise<TeamConfig> {
+export async function ensureTeamConfig(
+	teamDir: string,
+	init: { teamId: string; taskListId: string; leadName: string; style?: TeamsStyle },
+): Promise<TeamConfig> {
 	const file = getTeamConfigPath(teamDir);
 	const lock = `${file}.lock`;
 
@@ -122,6 +135,7 @@ export async function ensureTeamConfig(teamDir: string, init: { teamId: string; 
 				teamId: init.teamId,
 				taskListId: init.taskListId,
 				leadName: sanitizeName(init.leadName),
+				style: init.style ?? "normal",
 				createdAt: now,
 				updatedAt: now,
 				members: [
@@ -139,6 +153,27 @@ export async function ensureTeamConfig(teamDir: string, init: { teamId: string; 
 			return cfg;
 		},
 		{ label: "team-config:ensure" },
+	);
+}
+
+export async function setTeamStyle(teamDir: string, style: TeamsStyle): Promise<TeamConfig | null> {
+	const file = getTeamConfigPath(teamDir);
+	const lock = `${file}.lock`;
+
+	await ensureDir(teamDir);
+
+	return await withLock(
+		lock,
+		async () => {
+			const existing = coerceConfig(await readJson(file));
+			if (!existing) return null;
+
+			const now = new Date().toISOString();
+			const updated: TeamConfig = { ...existing, style, updatedAt: now };
+			await writeJsonAtomic(file, updated);
+			return updated;
+		},
+		{ label: `team-config:style:${style}` },
 	);
 }
 

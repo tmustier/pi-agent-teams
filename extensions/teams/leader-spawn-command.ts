@@ -1,4 +1,8 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { pickComradeNames } from "./names.js";
+import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeamsStyle } from "./teams-style.js";
+import { formatMemberDisplayName, getTeamsStrings, isSovietStyle } from "./teams-style.js";
 
 export type ContextMode = "fresh" | "branch";
 export type WorkspaceMode = "shared" | "worktree";
@@ -17,28 +21,41 @@ export type SpawnTeammateResult =
 export async function handleTeamSpawnCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
+	teammates: Map<string, TeammateRpc>;
+	style: TeamsStyle;
 	spawnTeammate: (
 		ctx: ExtensionContext,
 		opts: { name: string; mode?: ContextMode; workspaceMode?: WorkspaceMode; planRequired?: boolean },
 	) => Promise<SpawnTeammateResult>;
 }): Promise<void> {
-	const { ctx, rest, spawnTeammate } = opts;
+	const { ctx, rest, teammates, style, spawnTeammate } = opts;
+	const strings = getTeamsStrings(style);
 
-	const nameRaw = rest[0];
-	const spawnArgs = rest.slice(1);
-
+	// Parse flags from any position
+	let nameRaw: string | undefined;
 	let mode: ContextMode = "fresh";
 	let workspaceMode: WorkspaceMode = "shared";
 	let planRequired = false;
-	for (const a of spawnArgs) {
+	for (const a of rest) {
 		if (a === "fresh" || a === "branch") mode = a;
-		if (a === "shared" || a === "worktree") workspaceMode = a;
-		if (a === "plan") planRequired = true;
+		else if (a === "shared" || a === "worktree") workspaceMode = a;
+		else if (a === "plan") planRequired = true;
+		else if (!nameRaw) nameRaw = a;
 	}
 
+	// Auto-pick a name only in soviet style.
 	if (!nameRaw) {
-		ctx.ui.notify("Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan]", "error");
-		return;
+		if (!isSovietStyle(style)) {
+			ctx.ui.notify("Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan]", "error");
+			return;
+		}
+		const taken = new Set(teammates.keys());
+		const picked = pickComradeNames(1, taken)[0];
+		if (!picked) {
+			ctx.ui.notify("Failed to pick a comrade name", "error");
+			return;
+		}
+		nameRaw = picked;
 	}
 
 	const res = await spawnTeammate(ctx, { name: nameRaw, mode, workspaceMode, planRequired });
@@ -48,8 +65,9 @@ export async function handleTeamSpawnCommand(opts: {
 	}
 
 	for (const w of res.warnings) ctx.ui.notify(w, "warning");
+	const displayName = formatMemberDisplayName(style, res.name);
 	ctx.ui.notify(
-		`Spawned comrade '${res.name}' (${res.mode}${res.note ? ", " + res.note : ""} • ${res.workspaceMode})`,
+		`${displayName} ${strings.joinedVerb} (${res.mode}${res.note ? ", " + res.note : ""} \u00b7 ${res.workspaceMode})`,
 		"info",
 	);
 }

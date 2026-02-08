@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { cleanupTeamDir } from "./cleanup.js";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { unassignTasksForAgent, type TeamTask } from "./task-store.js";
-import { setMemberStatus } from "./team-config.js";
+import { setMemberStatus, setTeamStyle } from "./team-config.js";
+import { TEAMS_STYLES, type TeamsStyle, getTeamsStrings, formatMemberDisplayName } from "./teams-style.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 
 export async function handleTeamDelegateCommand(opts: {
@@ -25,6 +26,35 @@ export async function handleTeamDelegateCommand(opts: {
 	renderWidget();
 }
 
+export async function handleTeamStyleCommand(opts: {
+	ctx: ExtensionCommandContext;
+	rest: string[];
+	teamDir: string;
+	getStyle: () => TeamsStyle;
+	setStyle: (next: TeamsStyle) => void;
+	refreshTasks: () => Promise<void>;
+	renderWidget: () => void;
+}): Promise<void> {
+	const { ctx, rest, teamDir, getStyle, setStyle, refreshTasks, renderWidget } = opts;
+	const arg = rest[0];
+	if (!arg) {
+		ctx.ui.notify(`Teams style: ${getStyle()} (set with: /team style <${TEAMS_STYLES.join("|")}>)`, "info");
+		return;
+	}
+
+	const next: TeamsStyle | null = arg === "normal" || arg === "soviet" ? arg : null;
+	if (!next) {
+		ctx.ui.notify(`Unknown style: ${arg}. Use one of: ${TEAMS_STYLES.join(", ")}`, "error");
+		return;
+	}
+
+	setStyle(next);
+	await setTeamStyle(teamDir, next);
+	await refreshTasks();
+	renderWidget();
+	ctx.ui.notify(`Teams style set to ${next}`, "info");
+}
+
 export async function handleTeamCleanupCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
@@ -32,8 +62,10 @@ export async function handleTeamCleanupCommand(opts: {
 	refreshTasks: () => Promise<void>;
 	getTasks: () => TeamTask[];
 	renderWidget: () => void;
+	style: TeamsStyle;
 }): Promise<void> {
-	const { ctx, rest, teammates, refreshTasks, getTasks, renderWidget } = opts;
+	const { ctx, rest, teammates, refreshTasks, getTasks, renderWidget, style } = opts;
+	const strings = getTeamsStrings(style);
 
 	const flags = rest.filter((a) => a.startsWith("--"));
 	const argsOnly = rest.filter((a) => !a.startsWith("--"));
@@ -55,7 +87,7 @@ export async function handleTeamCleanupCommand(opts: {
 
 	if (!force && teammates.size > 0) {
 		ctx.ui.notify(
-			`Refusing to cleanup while ${teammates.size} RPC comrade(s) are running. Stop them first or use --force.`,
+			`Refusing to cleanup while ${teammates.size} RPC ${strings.memberTitle.toLowerCase()}(s) are running. Stop them first or use --force.`,
 			"error",
 		);
 		return;
@@ -109,9 +141,12 @@ export async function handleTeamShutdownCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
-	getCurrentCtx: () => ExtensionCommandContext | null;
+	leadName: string;
+	style: TeamsStyle;
+	getCurrentCtx: () => ExtensionContext | null;
 }): Promise<void> {
-	const { ctx, rest, teammates, getCurrentCtx } = opts;
+	const { ctx, rest, teammates, leadName, style, getCurrentCtx } = opts;
+	const strings = getTeamsStrings(style);
 	const nameRaw = rest[0];
 
 	// /team shutdown <name> [reason...] = request graceful worker shutdown via mailbox
@@ -127,19 +162,19 @@ export async function handleTeamShutdownCommand(opts: {
 		const payload: {
 			type: "shutdown_request";
 			requestId: string;
-			from: "chairman";
+			from: string;
 			timestamp: string;
 			reason?: string;
 		} = {
 			type: "shutdown_request",
 			requestId,
-			from: "chairman",
+			from: leadName,
 			timestamp: ts,
 			...(reason ? { reason } : {}),
 		};
 
 		await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-			from: "chairman",
+			from: leadName,
 			text: JSON.stringify(payload),
 			timestamp: ts,
 		});
@@ -153,7 +188,7 @@ export async function handleTeamShutdownCommand(opts: {
 			},
 		});
 
-		ctx.ui.notify(`Shutdown requested for ${name}`, "info");
+		ctx.ui.notify(`Shutdown requested for ${formatMemberDisplayName(style, name)}`, "info");
 
 		// Optional fallback for RPC teammates: force stop if it doesn't exit.
 		const t = teammates.get(name);
@@ -167,7 +202,10 @@ export async function handleTeamShutdownCommand(opts: {
 						await setMemberStatus(teamDir, name, "offline", {
 							meta: { shutdownFallback: true, shutdownRequestId: requestId },
 						});
-						getCurrentCtx()?.ui.notify(`Shutdown timeout; killed ${name}`, "warning");
+						getCurrentCtx()?.ui.notify(
+							`${formatMemberDisplayName(style, name)} did not comply; ${strings.killedVerb}`,
+							"warning",
+						);
 					} catch {
 						// ignore
 					}
@@ -182,7 +220,11 @@ export async function handleTeamShutdownCommand(opts: {
 	// Only prompt in interactive TTY mode. In RPC mode, confirm() would require
 	// the host to send extension_ui_response messages.
 	if (process.stdout.isTTY && process.stdin.isTTY) {
-		const ok = await ctx.ui.confirm("Shutdown", "Exit pi and stop all comrades?");
+		const msg =
+			style === "soviet"
+				? `Dissolve the ${strings.teamNoun} and dismiss all ${strings.memberTitle.toLowerCase()}s?`
+				: "Shutdown this team and stop all teammates?";
+		const ok = await ctx.ui.confirm("Shutdown", msg);
 		if (!ok) return;
 	}
 	// In RPC mode, shutdown is deferred until the next input line is handled.
@@ -195,11 +237,14 @@ export async function handleTeamStopCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
+	leadName: string;
+	style: TeamsStyle;
 	refreshTasks: () => Promise<void>;
 	getTasks: () => TeamTask[];
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, refreshTasks, getTasks, renderWidget } = opts;
+	const { ctx, rest, teammates, leadName, style, refreshTasks, getTasks, renderWidget } = opts;
+	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	const reason = rest.slice(1).join(" ").trim();
@@ -220,11 +265,11 @@ export async function handleTeamStopCommand(opts: {
 
 	const ts = new Date().toISOString();
 	await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-		from: "chairman",
+		from: leadName,
 		text: JSON.stringify({
 			type: "abort_request",
 			requestId: randomUUID(),
-			from: "chairman",
+			from: leadName,
 			taskId,
 			reason: reason || undefined,
 			timestamp: ts,
@@ -239,7 +284,7 @@ export async function handleTeamStopCommand(opts: {
 	}
 
 	ctx.ui.notify(
-		`Abort requested for ${name}${taskId ? ` (task #${taskId})` : ""}${t ? "" : " (mailbox only)"}`,
+		`Abort requested for ${formatMemberDisplayName(style, name)}${taskId ? ` (task #${taskId})` : ""}${t ? "" : " (mailbox only)"}`,
 		"warning",
 	);
 	renderWidget();
@@ -249,11 +294,14 @@ export async function handleTeamKillCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
+	leadName: string;
+	style: TeamsStyle;
 	taskListId: string | null;
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, taskListId, refreshTasks, renderWidget } = opts;
+	const { ctx, rest, teammates, taskListId, leadName, style, refreshTasks, renderWidget } = opts;
+	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	if (!nameRaw) {
@@ -263,7 +311,7 @@ export async function handleTeamKillCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const t = teammates.get(name);
 	if (!t) {
-		ctx.ui.notify(`Unknown comrade: ${name}`, "error");
+		ctx.ui.notify(`Unknown ${strings.memberTitle.toLowerCase()}: ${name}`, "error");
 		return;
 	}
 
@@ -273,10 +321,10 @@ export async function handleTeamKillCommand(opts: {
 	const teamId = ctx.sessionManager.getSessionId();
 	const teamDir = getTeamDir(teamId);
 	const effectiveTlId = taskListId ?? teamId;
-	await unassignTasksForAgent(teamDir, effectiveTlId, name, `Killed comrade '${name}'`);
+	await unassignTasksForAgent(teamDir, effectiveTlId, name, `${formatMemberDisplayName(style, name)} ${strings.killedVerb}`);
 	await setMemberStatus(teamDir, name, "offline", { meta: { killedAt: new Date().toISOString() } });
 
-	ctx.ui.notify(`Killed comrade ${name}`, "warning");
+	ctx.ui.notify(`${formatMemberDisplayName(style, name)} ${strings.killedVerb} (SIGTERM)`, "warning");
 	await refreshTasks();
 	renderWidget();
 }

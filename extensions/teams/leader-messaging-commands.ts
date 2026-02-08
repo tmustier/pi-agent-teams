@@ -6,14 +6,18 @@ import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { ensureTeamConfig } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeamsStyle } from "./teams-style.js";
+import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 
 export async function handleTeamSendCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
+	style: TeamsStyle;
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, renderWidget } = opts;
+	const { ctx, rest, teammates, style, renderWidget } = opts;
+	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	const msg = rest.slice(1).join(" ").trim();
@@ -24,7 +28,7 @@ export async function handleTeamSendCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const t = teammates.get(name);
 	if (!t) {
-		ctx.ui.notify(`Unknown comrade: ${name}`, "error");
+		ctx.ui.notify(`Unknown ${strings.memberTitle.toLowerCase()}: ${name}`, "error");
 		return;
 	}
 	if (t.status === "streaming") await t.followUp(msg);
@@ -37,9 +41,11 @@ export async function handleTeamSteerCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
+	style: TeamsStyle;
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, renderWidget } = opts;
+	const { ctx, rest, teammates, style, renderWidget } = opts;
+	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	const msg = rest.slice(1).join(" ").trim();
@@ -50,7 +56,7 @@ export async function handleTeamSteerCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const t = teammates.get(name);
 	if (!t) {
-		ctx.ui.notify(`Unknown comrade: ${name}`, "error");
+		ctx.ui.notify(`Unknown ${strings.memberTitle.toLowerCase()}: ${name}`, "error");
 		return;
 	}
 	await t.steer(msg);
@@ -61,8 +67,11 @@ export async function handleTeamSteerCommand(opts: {
 export async function handleTeamDmCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
+	leadName: string;
+	style: TeamsStyle;
 }): Promise<void> {
-	const { ctx, rest } = opts;
+	const { ctx, rest, leadName, style } = opts;
+	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	const msg = rest.slice(1).join(" ").trim();
@@ -73,22 +82,25 @@ export async function handleTeamDmCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const teamId = ctx.sessionManager.getSessionId();
 	await writeToMailbox(getTeamDir(teamId), TEAM_MAILBOX_NS, name, {
-		from: "chairman",
+		from: leadName,
 		text: msg,
 		timestamp: new Date().toISOString(),
 	});
-	ctx.ui.notify(`DM queued for ${name}`, "info");
+	ctx.ui.notify(`DM queued for ${formatMemberDisplayName(style, name)}`, "info");
 }
 
 export async function handleTeamBroadcastCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
+	leadName: string;
+	style: TeamsStyle;
 	refreshTasks: () => Promise<void>;
 	getTasks: () => TeamTask[];
 	getTaskListId: () => string | null;
 }): Promise<void> {
-	const { ctx, rest, teammates, refreshTasks, getTasks, getTaskListId } = opts;
+	const { ctx, rest, teammates, leadName, style, refreshTasks, getTasks, getTaskListId } = opts;
+	const strings = getTeamsStrings(style);
 
 	const msg = rest.join(" ").trim();
 	if (!msg) {
@@ -98,9 +110,8 @@ export async function handleTeamBroadcastCommand(opts: {
 
 	const teamId = ctx.sessionManager.getSessionId();
 	const teamDir = getTeamDir(teamId);
-	const leadName = "chairman";
 	const taskListId = getTaskListId();
-	const cfg = await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName });
+	const cfg = await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName, style });
 
 	const recipients = new Set<string>();
 	for (const m of cfg.members) {
@@ -116,7 +127,7 @@ export async function handleTeamBroadcastCommand(opts: {
 
 	const names = Array.from(recipients).sort();
 	if (names.length === 0) {
-		ctx.ui.notify("No comrades to broadcast to", "warning");
+		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to broadcast to`, "warning");
 		return;
 	}
 
@@ -124,12 +135,15 @@ export async function handleTeamBroadcastCommand(opts: {
 	await Promise.all(
 		names.map((name) =>
 			writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-				from: "chairman",
+				from: leadName,
 				text: msg,
 				timestamp: ts,
 			}),
 		),
 	);
 
-	ctx.ui.notify(`Broadcast queued for ${names.length} comrade(s): ${names.join(", ")}`, "info");
+	ctx.ui.notify(
+		`Broadcast queued for ${names.length} ${strings.memberTitle.toLowerCase()}(s): ${names.map((n) => formatMemberDisplayName(style, n)).join(", ")}`,
+		"info",
+	);
 }
