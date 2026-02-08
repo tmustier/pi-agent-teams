@@ -4,6 +4,10 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+	return typeof err === "object" && err !== null && "code" in err;
+}
+
 export interface LockOptions {
 	/** How long to wait to acquire the lock before failing. */
 	timeoutMs?: number;
@@ -32,8 +36,8 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 				label: opts.label,
 			};
 			fs.writeFileSync(fd, JSON.stringify(payload));
-		} catch (err: any) {
-			if (err?.code !== "EEXIST") throw err;
+		} catch (err: unknown) {
+			if (!isErrnoException(err) || err.code !== "EEXIST") throw err;
 
 			// Stale lock handling
 			try {

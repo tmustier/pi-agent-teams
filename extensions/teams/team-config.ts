@@ -36,24 +36,29 @@ async function ensureDir(p: string): Promise<void> {
 	await fs.promises.mkdir(p, { recursive: true });
 }
 
-async function readJson(file: string): Promise<any | null> {
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
+async function readJson(file: string): Promise<unknown | null> {
 	try {
 		const raw = await fs.promises.readFile(file, "utf8");
-		return JSON.parse(raw);
+		const parsed: unknown = JSON.parse(raw);
+		return parsed;
 	} catch {
 		return null;
 	}
 }
 
-async function writeJsonAtomic(file: string, data: any): Promise<void> {
+async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
 	await ensureDir(path.dirname(file));
 	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
 	await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
 	await fs.promises.rename(tmp, file);
 }
 
-function coerceMember(obj: any): TeamMember | null {
-	if (!obj || typeof obj !== "object") return null;
+function coerceMember(obj: unknown): TeamMember | null {
+	if (!isRecord(obj)) return null;
 	if (typeof obj.name !== "string") return null;
 	if (obj.role !== "lead" && obj.role !== "worker") return null;
 	if (obj.status !== "online" && obj.status !== "offline") return null;
@@ -67,12 +72,12 @@ function coerceMember(obj: any): TeamMember | null {
 		lastSeenAt: typeof obj.lastSeenAt === "string" ? obj.lastSeenAt : undefined,
 		sessionFile: typeof obj.sessionFile === "string" ? obj.sessionFile : undefined,
 		cwd: typeof obj.cwd === "string" ? obj.cwd : undefined,
-		meta: obj.meta && typeof obj.meta === "object" ? obj.meta : undefined,
+		meta: isRecord(obj.meta) ? obj.meta : undefined,
 	};
 }
 
-function coerceConfig(obj: any): TeamConfig | null {
-	if (!obj || typeof obj !== "object") return null;
+function coerceConfig(obj: unknown): TeamConfig | null {
+	if (!isRecord(obj)) return null;
 	if (obj.version !== 1) return null;
 	if (typeof obj.teamId !== "string") return null;
 	if (typeof obj.taskListId !== "string") return null;
@@ -81,7 +86,7 @@ function coerceConfig(obj: any): TeamConfig | null {
 	if (typeof obj.updatedAt !== "string") return null;
 	if (!Array.isArray(obj.members)) return null;
 
-	const members = obj.members.map(coerceMember).filter(Boolean) as TeamMember[];
+	const members = obj.members.map(coerceMember).filter((m): m is TeamMember => m !== null);
 	return {
 		version: 1,
 		teamId: obj.teamId,
@@ -157,12 +162,16 @@ export async function upsertMember(
 			const now = new Date().toISOString();
 			const name = sanitizeName(member.name);
 			const idx = existing.members.findIndex((m) => m.name === name);
+			const prev = idx >= 0 ? existing.members[idx] : undefined;
+			if (idx >= 0 && !prev) {
+				throw new Error(`Team config corrupted: member index out of range. idx=${idx}`);
+			}
 
 			const nextMember: TeamMember = {
 				name,
 				role: member.role,
 				status: member.status,
-				addedAt: idx >= 0 ? existing.members[idx].addedAt : member.addedAt ?? now,
+				addedAt: prev ? prev.addedAt : member.addedAt ?? now,
 				lastSeenAt: member.lastSeenAt ?? now,
 				sessionFile: member.sessionFile,
 				cwd: member.cwd,
@@ -170,8 +179,11 @@ export async function upsertMember(
 			};
 
 			const members = existing.members.slice();
-			if (idx >= 0) members[idx] = { ...members[idx], ...nextMember, addedAt: members[idx].addedAt };
-			else members.push(nextMember);
+			if (prev) {
+				members[idx] = { ...prev, ...nextMember, addedAt: prev.addedAt };
+			} else {
+				members.push(nextMember);
+			}
 
 			const updated: TeamConfig = {
 				...existing,
@@ -209,11 +221,13 @@ export async function setMemberStatus(
 
 			const now = new Date().toISOString();
 			const members = existing.members.slice();
+			const prev = members[idx];
+			if (!prev) return existing;
 			members[idx] = {
-				...members[idx],
+				...prev,
 				status,
 				lastSeenAt: extra?.lastSeenAt ?? now,
-				meta: extra?.meta ? { ...(members[idx].meta ?? {}), ...extra.meta } : members[idx].meta,
+				meta: extra?.meta ? { ...(prev.meta ?? {}), ...extra.meta } : prev.meta,
 			};
 
 			const updated: TeamConfig = { ...existing, updatedAt: now, members };

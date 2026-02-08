@@ -20,6 +20,12 @@
     "extensions": ["./extensions"],
     "skills": ["./skills"]
   },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.strict.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",

@@ -23,17 +23,31 @@ async function ensureDir(p: string): Promise<void> {
 	await fs.promises.mkdir(p, { recursive: true });
 }
 
-async function readJsonArray(file: string): Promise<any[]> {
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
+function coerceMailboxMessage(v: unknown): MailboxMessage | null {
+	if (!isRecord(v)) return null;
+	if (typeof v.from !== "string") return null;
+	if (typeof v.text !== "string") return null;
+	if (typeof v.timestamp !== "string") return null;
+	const read = typeof v.read === "boolean" ? v.read : false;
+	const color = typeof v.color === "string" ? v.color : undefined;
+	return { from: v.from, text: v.text, timestamp: v.timestamp, read, color };
+}
+
+async function readJsonArray(file: string): Promise<unknown[]> {
 	try {
 		const raw = await fs.promises.readFile(file, "utf8");
-		const parsed = JSON.parse(raw);
+		const parsed: unknown = JSON.parse(raw);
 		return Array.isArray(parsed) ? parsed : [];
 	} catch {
 		return [];
 	}
 }
 
-async function writeJsonAtomic(file: string, data: any): Promise<void> {
+async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
 	await ensureDir(path.dirname(file));
 	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
 	await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
@@ -83,14 +97,17 @@ export async function popUnreadMessages(teamDir: string, namespace: string, agen
 	return await withLock(
 		lockPath,
 		async () => {
-			const arr = (await readJsonArray(inboxPath)) as MailboxMessage[];
+			const arr = (await readJsonArray(inboxPath))
+				.map(coerceMailboxMessage)
+				.filter((m): m is MailboxMessage => m !== null);
 			if (arr.length === 0) return [];
 
 			const unread: MailboxMessage[] = [];
 			const updated = arr.map((m) => {
-				if (m && typeof m === "object" && !m.read) {
-					unread.push({ ...m, read: true });
-					return { ...m, read: true };
+				if (!m.read) {
+					const next = { ...m, read: true };
+					unread.push(next);
+					return next;
 				}
 				return m;
 			});

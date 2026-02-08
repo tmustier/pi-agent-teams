@@ -77,7 +77,8 @@ export async function handleTeamTaskCommand(opts: {
 			const parsed = parseAssigneePrefix(raw);
 			const owner = parsed.assignee ? sanitizeName(parsed.assignee) : undefined;
 			const description = parsed.text.trim();
-			const subject = description.split("\n")[0].slice(0, 120);
+			const firstLine = description.split("\n").at(0) ?? "";
+			const subject = firstLine.slice(0, 120);
 
 			const task = await createTask(teamDir, effectiveTlId, { subject, description, owner });
 

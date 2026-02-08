@@ -30,44 +30,58 @@ async function ensureDir(p: string): Promise<void> {
 	await fs.promises.mkdir(p, { recursive: true });
 }
 
-async function readJson(file: string): Promise<any | null> {
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
+function toStringArray(v: unknown): string[] {
+	return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+	return typeof err === "object" && err !== null && "code" in err;
+}
+
+async function readJson(file: string): Promise<unknown | null> {
 	try {
 		const raw = await fs.promises.readFile(file, "utf8");
-		return JSON.parse(raw);
+		const parsed: unknown = JSON.parse(raw);
+		return parsed;
 	} catch {
 		return null;
 	}
 }
 
-async function writeJsonAtomic(file: string, data: any): Promise<void> {
+async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
 	await ensureDir(path.dirname(file));
 	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
 	await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
 	await fs.promises.rename(tmp, file);
 }
 
-function isStatus(s: any): s is TaskStatus {
+function isStatus(s: unknown): s is TaskStatus {
 	return s === "pending" || s === "in_progress" || s === "completed";
 }
 
-function coerceTask(obj: any): TeamTask | null {
-	if (!obj || typeof obj !== "object") return null;
+function coerceTask(obj: unknown): TeamTask | null {
+	if (!isRecord(obj)) return null;
 	if (typeof obj.id !== "string") return null;
 	if (typeof obj.subject !== "string") return null;
 	if (typeof obj.description !== "string") return null;
 	if (!isStatus(obj.status)) return null;
 
+	const now = new Date().toISOString();
 	return {
 		id: obj.id,
 		subject: obj.subject,
 		description: obj.description,
 		owner: typeof obj.owner === "string" ? obj.owner : undefined,
 		status: obj.status,
-		blocks: Array.isArray(obj.blocks) ? obj.blocks.filter((x: any) => typeof x === "string") : [],
-		blockedBy: Array.isArray(obj.blockedBy) ? obj.blockedBy.filter((x: any) => typeof x === "string") : [],
-		metadata: obj.metadata && typeof obj.metadata === "object" ? obj.metadata : undefined,
-		createdAt: typeof obj.createdAt === "string" ? obj.createdAt : new Date().toISOString(),
-		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : new Date().toISOString(),
+		blocks: toStringArray(obj.blocks),
+		blockedBy: toStringArray(obj.blockedBy),
+		metadata: isRecord(obj.metadata) ? obj.metadata : undefined,
+		createdAt: typeof obj.createdAt === "string" ? obj.createdAt : now,
+		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : now,
 	};
 }
 
@@ -472,8 +486,8 @@ export async function clearTasks(
 	let entries: fs.Dirent[] = [];
 	try {
 		entries = await fs.promises.readdir(taskListDir, { withFileTypes: true });
-	} catch (err: any) {
-		if (err?.code === "ENOENT") {
+	} catch (err: unknown) {
+		if (isErrnoException(err) && err.code === "ENOENT") {
 			return { mode, taskListId, taskListDir, deletedTaskIds: [], skippedTaskIds: [], errors: [] };
 		}
 		throw err;
@@ -516,8 +530,8 @@ export async function clearTasks(
 		try {
 			await fs.promises.unlink(file);
 			deletedTaskIds.push(taskIdFromName);
-		} catch (err: any) {
-			if (err?.code === "ENOENT") continue;
+		} catch (err: unknown) {
+			if (isErrnoException(err) && err.code === "ENOENT") continue;
 			errors.push({ file, error: err instanceof Error ? err.message : String(err) });
 		}
 	}

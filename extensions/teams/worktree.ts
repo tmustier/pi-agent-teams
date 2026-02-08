@@ -85,7 +85,7 @@ export async function ensureWorktreeCwd(opts: {
 		// Create worktree + new branch from HEAD
 		await execGit(["worktree", "add", "-b", branch, worktreePath, "HEAD"], { cwd: repoRoot, timeoutMs: 120_000 });
 		return { cwd: worktreePath, warnings, mode: "worktree" };
-	} catch (err: any) {
+	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
 		// If the branch already exists (e.g. previous run), try adding worktree using the existing branch.
 		if (msg.includes("already exists") || msg.includes("is already checked out")) {
