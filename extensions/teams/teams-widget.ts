@@ -110,7 +110,10 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						truncateToWidth(" " + theme.fg("dim", "(no comrades)  /team spawn <name>"), width),
 					);
 				} else {
-					for (const name of Array.from(visibleNames).sort()) {
+					const sortedNames = Array.from(visibleNames).sort();
+					const nameColWidth = Math.max(...sortedNames.map((n) => visibleWidth(`Comrade ${n}`)));
+
+					for (const name of sortedNames) {
 						const rpc = teammates.get(name);
 						const cfg = cfgByName.get(name);
 						const activity = tracker.get(name);
@@ -129,7 +132,7 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						const toolCount =
 							activity.toolUseCount > 0 ? "  " + theme.fg("dim", `(${String(activity.toolUseCount)} tools)`) : "";
 
-						const row = ` ${icon} ${padRight(styledName, 20)} ${statusLabel}${taskTag}${toolLabel}${toolCount}`;
+						const row = ` ${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${taskTag}${toolLabel}${toolCount}`;
 						lines.push(truncateToWidth(row, width));
 					}
 				}
