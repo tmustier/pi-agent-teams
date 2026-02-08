@@ -7,16 +7,9 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
-import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
+import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
-import {
-	TEAM_MAILBOX_NS,
-	isIdleNotification,
-	isPeerDmSent,
-	isPlanApprovalRequest,
-	isShutdownApproved,
-	isShutdownRejected,
-} from "./protocol.js";
+import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { cleanupTeamDir } from "./cleanup.js";
 import {
 	addTaskDependency,
@@ -36,6 +29,7 @@ import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type T
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { ensureWorktreeCwd } from "./worktree.js";
 import { buildTeamsWidgetLines } from "./leader-widget.js";
+import { pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
 
 
 type ContextMode = "fresh" | "branch";
@@ -78,6 +72,8 @@ const TeamsToolParams = Type.Object({
 	contextMode: Type.Optional(TeamsContextModeSchema),
 	workspaceMode: Type.Optional(TeamsWorkspaceModeSchema),
 });
+
+type TeamsToolParamsType = Static<typeof TeamsToolParams>;
 
 function getTeamsExtensionEntryPath(): string | null {
 	// In dev, teammates won't automatically have this extension unless it is installed or discoverable.
@@ -373,144 +369,14 @@ export function runLeader(pi: ExtensionAPI): void {
 	const pollLeaderInbox = async () => {
 		if (!currentCtx || !currentTeamId) return;
 		const teamDir = getTeamDir(currentTeamId);
-		const msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "team-lead");
-		if (!msgs.length) return;
-
-		for (const m of msgs) {
-			const approved = isShutdownApproved(m.text);
-			if (approved) {
-				const name = sanitizeName(approved.from);
-				const cfg = await ensureTeamConfig(teamDir, {
-					teamId: currentTeamId,
-					taskListId: taskListId ?? currentTeamId,
-					leadName: "team-lead",
-				});
-				if (!cfg.members.some((mm) => mm.name === name)) {
-					await upsertMember(teamDir, { name, role: "worker", status: "offline" });
-				}
-				await setMemberStatus(teamDir, name, "offline", {
-					lastSeenAt: approved.timestamp,
-					meta: {
-						shutdownApprovedRequestId: approved.requestId,
-						shutdownApprovedAt: approved.timestamp ?? new Date().toISOString(),
-					},
-				});
-				currentCtx.ui.notify(`${name} approved shutdown`, "info");
-				continue;
-			}
-
-			const rejected = isShutdownRejected(m.text);
-			if (rejected) {
-				const name = sanitizeName(rejected.from);
-				await setMemberStatus(teamDir, name, "online", {
-					lastSeenAt: rejected.timestamp,
-					meta: {
-						shutdownRejectedAt: rejected.timestamp ?? new Date().toISOString(),
-						shutdownRejectedReason: rejected.reason,
-					},
-				});
-				currentCtx.ui.notify(`${name} rejected shutdown: ${rejected.reason}`, "warning");
-				continue;
-			}
-
-			const planReq = isPlanApprovalRequest(m.text);
-			if (planReq) {
-				const name = sanitizeName(planReq.from);
-				const preview = planReq.plan.length > 500 ? planReq.plan.slice(0, 500) + "..." : planReq.plan;
-				currentCtx.ui.notify(`${name} requests plan approval:\n${preview}`, "info");
-				pendingPlanApprovals.set(name, {
-					requestId: planReq.requestId,
-					name,
-					taskId: planReq.taskId,
-				});
-				continue;
-			}
-
-			const peerDm = isPeerDmSent(m.text);
-			if (peerDm) {
-				currentCtx.ui.notify(`${peerDm.from} → ${peerDm.to}: ${peerDm.summary}`, "info");
-				continue;
-			}
-
-			const idle = isIdleNotification(m.text);
-			if (idle) {
-				const name = sanitizeName(idle.from);
-				if (idle.failureReason) {
-					const cfg = await ensureTeamConfig(teamDir, {
-						teamId: currentTeamId,
-						taskListId: taskListId ?? currentTeamId,
-						leadName: "team-lead",
-					});
-					if (!cfg.members.some((mm) => mm.name === name)) {
-						await upsertMember(teamDir, { name, role: "worker", status: "offline" });
-					}
-					await setMemberStatus(teamDir, name, "offline", {
-						lastSeenAt: idle.timestamp,
-						meta: { offlineReason: idle.failureReason },
-					});
-					currentCtx.ui.notify(`${name} went offline (${idle.failureReason})`, "warning");
-				} else {
-					const desiredSessionName = `pi agent teams - comrade ${name}`;
-
-					const cfg = await ensureTeamConfig(teamDir, {
-						teamId: currentTeamId,
-						taskListId: taskListId ?? currentTeamId,
-						leadName: "team-lead",
-					});
-
-					const member = cfg.members.find((mm) => mm.name === name);
-					const existingSessionNameRaw = member?.meta?.["sessionName"];
-					const existingSessionName =
-						typeof existingSessionNameRaw === "string" ? existingSessionNameRaw : undefined;
-					const shouldSendName = existingSessionName !== desiredSessionName;
-
-					if (!member) {
-						// Manual tmux worker: learn from idle notifications.
-						await upsertMember(teamDir, {
-							name,
-							role: "worker",
-							status: "online",
-							lastSeenAt: idle.timestamp,
-							meta: { sessionName: desiredSessionName },
-						});
-					} else {
-						await setMemberStatus(teamDir, name, "online", {
-							lastSeenAt: idle.timestamp,
-							meta: { sessionName: desiredSessionName },
-						});
-					}
-
-					if (shouldSendName) {
-						try {
-							const ts = new Date().toISOString();
-							await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
-								from: "team-lead",
-								text: JSON.stringify({
-									type: "set_session_name",
-									name: desiredSessionName,
-									from: "team-lead",
-									timestamp: ts,
-								}),
-								timestamp: ts,
-							});
-						} catch {
-							// ignore
-						}
-					}
-
-					if (idle.completedTaskId && idle.completedStatus === "failed") {
-						currentCtx.ui.notify(`${name} aborted task #${idle.completedTaskId}`, "warning");
-					} else if (idle.completedTaskId) {
-						currentCtx.ui.notify(`${name} is idle task #${idle.completedTaskId}`, "info");
-					} else {
-						currentCtx.ui.notify(`${name} is idle`, "info");
-					}
-				}
-				continue;
-			}
-
-			currentCtx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
-		}
+		const effectiveTaskListId = taskListId ?? currentTeamId;
+		await pollLeaderInboxImpl({
+			ctx: currentCtx,
+			teamId: currentTeamId,
+			teamDir,
+			taskListId: effectiveTaskListId,
+			pendingPlanApprovals,
+		});
 	};
 
 	pi.on("tool_call", (event, _ctx) => {
@@ -598,8 +464,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		].join(" "),
 		parameters: TeamsToolParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<any>> {
-			const action = (params as any).action ?? "delegate";
+		async execute(_toolCallId, params: TeamsToolParamsType, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+			const action = params.action ?? "delegate";
 			if (action !== "delegate") {
 				return {
 					content: [{ type: "text", text: `Unsupported action: ${String(action)}` }],
@@ -607,8 +473,8 @@ export function runLeader(pi: ExtensionAPI): void {
 				};
 			}
 
-			const inputTasks = (params as any).tasks;
-			if (!Array.isArray(inputTasks) || inputTasks.length === 0) {
+			const inputTasks = params.tasks ?? [];
+			if (inputTasks.length === 0) {
 				return {
 					content: [
 						{ type: "text", text: "No tasks provided. Provide tasks: [{text, assignee?}, ...]" },
@@ -617,18 +483,17 @@ export function runLeader(pi: ExtensionAPI): void {
 				};
 			}
 
-			const contextMode: ContextMode = (params as any).contextMode === "branch" ? "branch" : "fresh";
-			const requestedWorkspaceMode: WorkspaceMode =
-				(params as any).workspaceMode === "worktree" ? "worktree" : "shared";
+			const contextMode: ContextMode = params.contextMode === "branch" ? "branch" : "fresh";
+			const requestedWorkspaceMode: WorkspaceMode = params.workspaceMode === "worktree" ? "worktree" : "shared";
 
 			const teamId = ctx.sessionManager.getSessionId();
 			const teamDir = getTeamDir(teamId);
 			await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "team-lead" });
 
 			let teammateNames: string[] = [];
-			const explicit = (params as any).teammates;
-			if (Array.isArray(explicit) && explicit.length) {
-				teammateNames = explicit.map((n: any) => sanitizeName(String(n))).filter(Boolean);
+			const explicit = params.teammates;
+			if (explicit && explicit.length) {
+				teammateNames = explicit.map((n) => sanitizeName(n)).filter((n) => n.length > 0);
 			}
 
 			if (teammateNames.length === 0 && teammates.size > 0) {
@@ -636,7 +501,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			}
 
 			if (teammateNames.length === 0) {
-				const maxTeammates = Math.max(1, Math.min(16, Number((params as any).maxTeammates ?? 4) || 4));
+				const maxTeammates = Math.max(1, Math.min(16, params.maxTeammates ?? 4));
 				const count = Math.min(maxTeammates, inputTasks.length);
 				teammateNames = Array.from({ length: count }, (_, i) => `agent${i + 1}`);
 			}
@@ -666,13 +531,13 @@ export function runLeader(pi: ExtensionAPI): void {
 			for (const t of inputTasks) {
 				if (signal?.aborted) break;
 
-				const text = typeof t?.text === "string" ? t.text.trim() : "";
+				const text = t.text.trim();
 				if (!text) {
 					warnings.push("Skipping empty task");
 					continue;
 				}
 
-				const explicitAssignee = typeof t?.assignee === "string" ? sanitizeName(t.assignee) : undefined;
+				const explicitAssignee = t.assignee ? sanitizeName(t.assignee) : undefined;
 				const assignee = explicitAssignee ?? teammateNames[rr++ % teammateNames.length];
 				if (!assignee) {
 					warnings.push(`No assignee available for task: ${text.slice(0, 60)}`);
@@ -982,13 +847,19 @@ export function runLeader(pi: ExtensionAPI): void {
 
 						const requestId = randomUUID();
 						const ts = new Date().toISOString();
-						const payload: any = {
+						const payload: {
+							type: "shutdown_request";
+							requestId: string;
+							from: "team-lead";
+							timestamp: string;
+							reason?: string;
+						} = {
 							type: "shutdown_request",
 							requestId,
 							from: "team-lead",
 							timestamp: ts,
+							...(reason ? { reason } : {}),
 						};
-						if (reason) payload.reason = reason;
 
 						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, name, {
 							from: "team-lead",
