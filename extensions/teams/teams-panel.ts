@@ -6,6 +6,16 @@ import type { TeamTask } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import {
+	STATUS_COLOR,
+	STATUS_ICON,
+	formatTokens,
+	getVisibleWorkerNames,
+	padRight,
+	resolveStatus,
+	toolActivity,
+	toolVerb,
+} from "./teams-ui-shared.js";
 
 export interface InteractiveWidgetDeps {
 	getTeammates(): Map<string, TeammateRpc>;
@@ -22,81 +32,9 @@ export interface InteractiveWidgetDeps {
 	restoreWidget(): void;
 }
 
-// ── Status icon + color (shared with teams-widget.ts) ──
-
-const STATUS_ICON: Record<TeammateStatus, string> = {
-	streaming: "\u25c9",
-	idle: "\u25cf",
-	starting: "\u25cb",
-	stopped: "\u2717",
-	error: "\u2717",
-};
-
-const STATUS_COLOR: Record<TeammateStatus, ThemeColor> = {
-	streaming: "accent",
-	idle: "success",
-	starting: "muted",
-	stopped: "dim",
-	error: "error",
-};
-
-const TOOL_VERB: Record<string, string> = {
-	read: "reading\u2026",
-	edit: "editing\u2026",
-	write: "writing\u2026",
-	grep: "searching\u2026",
-	glob: "finding files\u2026",
-	bash: "running\u2026",
-	task: "delegating\u2026",
-	webfetch: "fetching\u2026",
-	websearch: "searching web\u2026",
-};
-
-// ── Helpers ──
-
-function padRight(str: string, targetWidth: number): string {
-	const w = visibleWidth(str);
-	return w >= targetWidth ? str : str + " ".repeat(targetWidth - w);
-}
-
-function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
-	if (rpc) return rpc.status;
-	return cfg?.status === "online" ? "idle" : "stopped";
-}
-
-function formatTokens(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-	return String(n);
-}
-
-function toolActivity(toolName: string | null): string {
-	if (!toolName) return "";
-	const key = toolName.toLowerCase();
-	return TOOL_VERB[key] ?? `${key}\u2026`;
-}
-
 function formatTimestamp(ts: number): string {
 	const d = new Date(ts);
 	return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function getComradeNames(deps: InteractiveWidgetDeps): string[] {
-	const teamConfig = deps.getTeamConfig();
-	const teammates = deps.getTeammates();
-	const tasks = deps.getTasks();
-	const leadName = teamConfig?.leadName;
-	const cfgMembers = teamConfig?.members ?? [];
-
-	const names = new Set<string>();
-	for (const name of teammates.keys()) names.add(name);
-	for (const m of cfgMembers) {
-		if (m.role === "worker" && m.status === "online") names.add(m.name);
-	}
-	for (const t of tasks) {
-		if (t.owner && t.owner !== leadName && t.status === "in_progress") names.add(t.owner);
-	}
-	return Array.from(names).sort();
 }
 
 // ── Row data (mirrors teams-widget.ts) ──
@@ -148,7 +86,7 @@ function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: numb
 	}
 
 	if (entry.kind === "tool_start") {
-		const verb = TOOL_VERB[entry.toolName.toLowerCase()] ?? `${entry.toolName}\u2026`;
+		const verb = toolVerb(entry.toolName);
 		return [` ${tsStr}  ${theme.fg("warning", verb)}`];
 	}
 
@@ -173,7 +111,11 @@ function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: numb
 export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: InteractiveWidgetDeps): Promise<void> {
 	const style = deps.getStyle();
 	const strings = getTeamsStrings(style);
-	const names = getComradeNames(deps);
+	const names = getVisibleWorkerNames({
+		teammates: deps.getTeammates(),
+		teamConfig: deps.getTeamConfig(),
+		tasks: deps.getTasks(),
+	});
 	if (names.length === 0) {
 		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to show`, "info");
 		return;
@@ -238,8 +180,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						});
 					}
 
-					// Comrades
-					const comradeNames = getComradeNames(deps);
+					// Workers
+					const comradeNames = getVisibleWorkerNames({ teammates, teamConfig, tasks });
 					for (const name of comradeNames) {
 						const rpc = teammates.get(name);
 						const cfg = cfgByName.get(name);
@@ -626,7 +568,11 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						}
 
 						// ── Overview mode ──
-						const comradeNames = getComradeNames(deps);
+						const comradeNames = getVisibleWorkerNames({
+							teammates: deps.getTeammates(),
+							teamConfig: deps.getTeamConfig(),
+							tasks: deps.getTasks(),
+						});
 
 						if (matchesKey(data, "escape") || data === "q") {
 							done(undefined);

@@ -7,6 +7,15 @@ import type { TeamTask } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import {
+	STATUS_COLOR,
+	STATUS_ICON,
+	formatTokens,
+	getVisibleWorkerNames,
+	padRight,
+	resolveStatus,
+	toolActivity,
+} from "./teams-ui-shared.js";
 
 export interface WidgetDeps {
 	getTeammates(): Map<string, TeammateRpc>;
@@ -19,57 +28,6 @@ export interface WidgetDeps {
 
 export type WidgetFactory = (tui: TUI, theme: Theme) => Component;
 
-// Status icon and color mapping
-const STATUS_ICON: Record<TeammateStatus, string> = {
-	streaming: "\u25c9",
-	idle: "\u25cf",
-	starting: "\u25cb",
-	stopped: "\u2717",
-	error: "\u2717",
-};
-
-const STATUS_COLOR: Record<TeammateStatus, ThemeColor> = {
-	streaming: "accent",
-	idle: "success",
-	starting: "muted",
-	stopped: "dim",
-	error: "error",
-};
-
-function padRight(str: string, targetWidth: number): string {
-	const w = visibleWidth(str);
-	return w >= targetWidth ? str : str + " ".repeat(targetWidth - w);
-}
-
-function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
-	if (rpc) return rpc.status;
-	return cfg?.status === "online" ? "idle" : "stopped";
-}
-
-function formatTokens(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-	return String(n);
-}
-
-const TOOL_VERB: Record<string, string> = {
-	read: "reading\u2026",
-	edit: "editing\u2026",
-	write: "writing\u2026",
-	grep: "searching\u2026",
-	glob: "finding files\u2026",
-	bash: "running\u2026",
-	task: "delegating\u2026",
-	webfetch: "fetching\u2026",
-	websearch: "searching web\u2026",
-};
-
-function toolActivity(toolName: string | null): string {
-	if (!toolName) return "";
-	const key = toolName.toLowerCase();
-	return TOOL_VERB[key] ?? `${key}\u2026`;
-}
-
 interface WidgetRow {
 	icon: string; // raw char (before styling)
 	iconColor: ThemeColor;
@@ -77,7 +35,7 @@ interface WidgetRow {
 	statusKey: TeammateStatus;
 	pending: number;
 	completed: number;
-	tokensStr: string; // "\u2014" for chairman
+	tokensStr: string; // "—" for chairman
 	activityText: string;
 }
 
@@ -131,17 +89,8 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					});
 				}
 
-				// Comrade rows
-				const visibleNames = new Set<string>();
-				for (const name of teammates.keys()) visibleNames.add(name);
-				for (const m of cfgMembers) {
-					if (m.role === "worker" && m.status === "online") visibleNames.add(m.name);
-				}
-				for (const t of tasks) {
-					if (t.owner && t.owner !== leadName && t.status === "in_progress") visibleNames.add(t.owner);
-				}
-
-				if (visibleNames.size === 0 && rows.length === 0) {
+				const workerNames = getVisibleWorkerNames({ teammates, teamConfig, tasks });
+				if (workerNames.length === 0 && rows.length === 0) {
 					lines.push(
 						truncateToWidth(
 							" " + theme.fg("dim", `(no ${strings.memberTitle.toLowerCase()}s)  /team spawn <name>`),
@@ -149,8 +98,7 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						),
 					);
 				} else {
-					const sortedNames = Array.from(visibleNames).sort();
-					for (const name of sortedNames) {
+					for (const name of workerNames) {
 						const rpc = teammates.get(name);
 						const cfg = cfgByName.get(name);
 						const statusKey = resolveStatus(rpc, cfg);
@@ -173,7 +121,7 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					const totalPending = tasks.filter((t) => t.status === "pending").length;
 					const totalCompleted = tasks.filter((t) => t.status === "completed").length;
 					let totalTokensRaw = 0;
-					for (const name of sortedNames) totalTokensRaw += tracker.get(name).totalTokens;
+					for (const name of workerNames) totalTokensRaw += tracker.get(name).totalTokens;
 					const totalTokensStr = formatTokens(totalTokensRaw);
 
 					const nameColWidth = Math.max(...rows.map((r) => visibleWidth(r.displayName)));
@@ -200,7 +148,6 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					}
 
 					// ── Total row ──
-					const leftWidth = nameColWidth + 13;
 					const sepLine = " " + theme.fg("dim", "\u2500".repeat(Math.max(0, width - 2)));
 					lines.push(truncateToWidth(sepLine, width));
 
@@ -215,7 +162,7 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						"muted",
 						` \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${ttokStr} tokens`,
 					);
-					// nameColWidth + 4 = " ◆ " + name;  then " " + pctLabel fills the status column
+					// nameColWidth + 4 = " ◆ " + name; then " " + pctLabel fills the status column
 					const totalRow = ` ${padRight(totalLabel, nameColWidth + 3)} ${pctLabel}${totalSuffix}`;
 					lines.push(truncateToWidth(totalRow, width));
 				}
