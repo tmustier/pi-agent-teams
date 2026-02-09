@@ -6,7 +6,7 @@ import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { unassignTasksForAgent, type TeamTask } from "./task-store.js";
-import { setMemberStatus, setTeamStyle } from "./team-config.js";
+import { setMemberStatus, setTeamStyle, type TeamConfig } from "./team-config.js";
 import { TEAMS_STYLES, type TeamsStyle, getTeamsStrings, formatMemberDisplayName } from "./teams-style.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 
@@ -141,14 +141,16 @@ export async function handleTeamShutdownCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
+	getTeamConfig: () => TeamConfig | null;
 	leadName: string;
 	style: TeamsStyle;
 	getCurrentCtx: () => ExtensionContext | null;
 	stopAllTeammates: (ctx: ExtensionContext, reason: string) => Promise<void>;
 	refreshTasks: () => Promise<void>;
+	getTasks: () => TeamTask[];
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, leadName, style, getCurrentCtx, stopAllTeammates, refreshTasks, renderWidget } = opts;
+	const { ctx, rest, teammates, getTeamConfig, leadName, style, getCurrentCtx, stopAllTeammates, refreshTasks, getTasks, renderWidget } = opts;
 	const strings = getTeamsStrings(style);
 	const nameRaw = rest[0];
 
@@ -220,7 +222,15 @@ export async function handleTeamShutdownCommand(opts: {
 	}
 
 	// /team shutdown (no args) = stop all teammates but keep the leader session alive
-	if (teammates.size === 0) {
+	await refreshTasks();
+	const cfgBefore = getTeamConfig();
+	const cfgWorkersOnline = (cfgBefore?.members ?? []).filter((m) => m.role === "worker" && m.status === "online");
+
+	const activeNames = new Set<string>();
+	for (const name of teammates.keys()) activeNames.add(name);
+	for (const m of cfgWorkersOnline) activeNames.add(m.name);
+
+	if (activeNames.size === 0) {
 		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to shut down`, "info");
 		return;
 	}
@@ -229,7 +239,7 @@ export async function handleTeamShutdownCommand(opts: {
 		const msg =
 			style === "soviet"
 				? `Dismiss all ${strings.memberTitle.toLowerCase()}s from the ${strings.teamNoun}?`
-				: `Stop all ${String(teammates.size)} teammate${teammates.size === 1 ? "" : "s"}?`;
+				: `Stop all ${String(activeNames.size)} teammate${activeNames.size === 1 ? "" : "s"}?`;
 		const ok = await ctx.ui.confirm("Shutdown team", msg);
 		if (!ok) return;
 	}
@@ -238,11 +248,125 @@ export async function handleTeamShutdownCommand(opts: {
 		style === "soviet"
 			? `The ${strings.teamNoun} is dissolved by the chairman`
 			: "Stopped by /team shutdown";
+	// Stop RPC teammates we own
 	await stopAllTeammates(ctx, reason);
+
+	// Best-effort: ask *manual* workers (persisted in config.json) to shut down too.
+	// Also mark them offline so they stop cluttering the UI if they were left behind from old runs.
 	await refreshTasks();
+	const cfg = getTeamConfig();
+	const teamId = ctx.sessionManager.getSessionId();
+	const teamDir = getTeamDir(teamId);
+
+	const inProgressOwners = new Set<string>();
+	for (const t of getTasks()) {
+		if (t.owner && t.status === "in_progress") inProgressOwners.add(t.owner);
+	}
+
+	const manualWorkers = (cfg?.members ?? []).filter((m) => m.role === "worker" && m.status === "online");
+	for (const m of manualWorkers) {
+		// If it's an RPC teammate we already stopped above, skip mailbox request.
+		if (teammates.has(m.name)) continue;
+		// If a manual worker still owns an in-progress task, don't force it offline in the UI.
+		if (inProgressOwners.has(m.name)) continue;
+
+		const requestId = randomUUID();
+		const ts = new Date().toISOString();
+		try {
+			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, m.name, {
+				from: leadName,
+				text: JSON.stringify({
+					type: "shutdown_request",
+					requestId,
+					from: leadName,
+					timestamp: ts,
+					reason,
+				}),
+				timestamp: ts,
+			});
+		} catch {
+			// ignore mailbox errors
+		}
+
+		void setMemberStatus(teamDir, m.name, "offline", {
+			meta: { shutdownRequestedAt: ts, shutdownRequestId: requestId, stoppedReason: reason },
+		});
+	}
+
 	renderWidget();
 	ctx.ui.notify(
 		`Team ended: all ${strings.memberTitle.toLowerCase()}s stopped (leader session remains active)`,
+		"info",
+	);
+}
+
+export async function handleTeamPruneCommand(opts: {
+	ctx: ExtensionCommandContext;
+	rest: string[];
+	teammates: Map<string, TeammateRpc>;
+	getTeamConfig: () => TeamConfig | null;
+	refreshTasks: () => Promise<void>;
+	getTasks: () => TeamTask[];
+	style: TeamsStyle;
+	renderWidget: () => void;
+}): Promise<void> {
+	const { ctx, rest, teammates, getTeamConfig, refreshTasks, getTasks, style, renderWidget } = opts;
+	const strings = getTeamsStrings(style);
+
+	const flags = rest.filter((a) => a.startsWith("--"));
+	const argsOnly = rest.filter((a) => !a.startsWith("--"));
+	const all = flags.includes("--all");
+	const unknownFlags = flags.filter((f) => f !== "--all");
+	if (unknownFlags.length) {
+		ctx.ui.notify(`Unknown flag(s): ${unknownFlags.join(", ")}`, "error");
+		return;
+	}
+	if (argsOnly.length) {
+		ctx.ui.notify("Usage: /team prune [--all]", "error");
+		return;
+	}
+
+	await refreshTasks();
+	const cfg = getTeamConfig();
+	const members = (cfg?.members ?? []).filter((m) => m.role === "worker");
+	if (!members.length) {
+		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to prune`, "info");
+		renderWidget();
+		return;
+	}
+
+	const inProgressOwners = new Set<string>();
+	for (const t of getTasks()) {
+		if (t.owner && t.status === "in_progress") inProgressOwners.add(t.owner);
+	}
+
+	const cutoffMs = 60 * 60 * 1000; // 1h
+	const now = Date.now();
+
+	const pruned: string[] = [];
+	for (const m of members) {
+		if (teammates.has(m.name)) continue; // still tracked as RPC
+		if (inProgressOwners.has(m.name)) continue; // still actively working
+		if (!all) {
+			const lastSeen = m.lastSeenAt ? Date.parse(m.lastSeenAt) : NaN;
+			if (!Number.isFinite(lastSeen)) continue;
+			if (now - lastSeen < cutoffMs) continue;
+		}
+
+		const teamId = ctx.sessionManager.getSessionId();
+		const teamDir = getTeamDir(teamId);
+		await setMemberStatus(teamDir, m.name, "offline", {
+			meta: { prunedAt: new Date().toISOString(), prunedBy: "leader" },
+		});
+		pruned.push(m.name);
+	}
+
+	await refreshTasks();
+	renderWidget();
+	ctx.ui.notify(
+		pruned.length
+			? `Pruned ${pruned.length} stale ${strings.memberTitle.toLowerCase()}(s): ${pruned.join(", ")}`
+			: `No stale ${strings.memberTitle.toLowerCase()}s to prune (use --all to force)`,
 		"info",
 	);
 }

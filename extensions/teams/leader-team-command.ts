@@ -9,6 +9,7 @@ import {
 	handleTeamCleanupCommand,
 	handleTeamDelegateCommand,
 	handleTeamKillCommand,
+	handleTeamPruneCommand,
 	handleTeamShutdownCommand,
 	handleTeamStopCommand,
 	handleTeamStyleCommand,
@@ -46,6 +47,7 @@ const TEAM_HELP_TEXT = [
 	"  /team plan approve <name>",
 	"  /team plan reject <name> [feedback...]",
 	"  /team cleanup [--force]",
+	"  /team prune [--all]  # hide stale manual teammates (mark offline)",
 	"  /team task add <text...>",
 	"  /team task assign <id> <agent>",
 	"  /team task unassign <id>",
@@ -163,6 +165,19 @@ export async function handleTeamCommand(opts: {
 			});
 		},
 
+		prune: async () => {
+			await handleTeamPruneCommand({
+				ctx,
+				rest,
+				teammates,
+				getTeamConfig,
+				refreshTasks,
+				getTasks,
+				style,
+				renderWidget,
+			});
+		},
+
 		delegate: async () => {
 			await handleTeamDelegateCommand({
 				ctx,
@@ -178,11 +193,13 @@ export async function handleTeamCommand(opts: {
 				ctx,
 				rest,
 				teammates,
+				getTeamConfig,
 				leadName,
 				style,
 				getCurrentCtx,
 				stopAllTeammates,
 				refreshTasks,
+				getTasks,
 				renderWidget,
 			});
 		},
