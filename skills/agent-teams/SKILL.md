@@ -10,7 +10,7 @@ Spawn and coordinate teammate agents that work in parallel on shared task lists,
 ## Core concepts
 
 - **Leader** (you): orchestrates, delegates, reviews. Runs the `/team` command and the `teams` LLM tool.
-- **Teammates**: child Pi processes that poll for tasks, execute them, and report back. Sessions are named `pi agent teams - teammate <name>` (or `... - comrade <name>` in soviet style).
+- **Teammates**: child Pi processes that poll for tasks, execute them, and report back. Sessions are named `pi agent teams - <role> <name>` where `<role>` depends on the current style (e.g. teammate/comrade/matey).
 - **Task list**: file-per-task store with statuses (pending/in_progress/completed), owners, and dependency tracking.
 - **Mailbox**: file-based message queue. Two namespaces: `team` (DMs, notifications, shutdown) and `taskListId` (task assignments).
 
