@@ -51,11 +51,14 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 				const strings = getTeamsStrings(style);
 				const delegateMode = deps.isDelegateMode();
 
-				// Hide when no active team state
+				// Hide when no active team state.
+				// We intentionally ignore "completed-only" task lists so the widget doesn't stick around
+				// after /team shutdown.
 				const hasOnlineMembers = (teamConfig?.members ?? []).some(
 					(m) => m.role === "worker" && m.status === "online",
 				);
-				if (teammates.size === 0 && tasks.length === 0 && !hasOnlineMembers) {
+				const hasActiveTasks = tasks.some((t) => t.status !== "completed");
+				if (teammates.size === 0 && !hasOnlineMembers && !hasActiveTasks) {
 					return [];
 				}
 
