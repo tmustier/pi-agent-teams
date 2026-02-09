@@ -124,7 +124,8 @@ All management commands live under `/team`.
 | `/team broadcast <msg>` | Message all teammates |
 | `/team stop <name> [reason]` | Abort current work (resets task to pending) |
 | `/team shutdown <name> [reason]` | Graceful shutdown (handshake) |
-| `/team shutdown` | Stop all teammates (leader session remains active) |
+| `/team shutdown` | Stop all teammates (RPC + best-effort manual) (leader session remains active) |
+| `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
 | `/team kill <name>` | Force-terminate |
 | `/team cleanup [--force]` | Delete team artifacts |
 | `/team id` | Print team/task-list IDs and paths |

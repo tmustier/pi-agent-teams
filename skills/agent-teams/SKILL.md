@@ -95,8 +95,9 @@ Spawning with `plan` restricts the teammate to read-only tools. After producing 
 ```
 /team panel                    # interactive overlay with teammate details
 /team list                     # show teammates and their state
-/team shutdown                 # stop all teammates (leader session remains active)
+/team shutdown                 # stop all teammates (RPC + best-effort manual) (leader session remains active)
 /team shutdown <name>          # graceful shutdown (teammate can reject if busy)
+/team prune [--all]            # hide stale manual teammates (mark offline in config)
 /team kill <name>              # force-terminate one RPC teammate
 /team cleanup [--force]        # delete team directory after all teammates stopped
 ```

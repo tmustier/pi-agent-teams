@@ -112,6 +112,13 @@ Optional: stop all teammates without ending the leader session:
 
 **Expected:** all teammates stop; leader remains active until you exit it (e.g. ctrl+d).
 
+If old/manual teammates still show as idle (stale config entries), prune them:
+
+```
+/team prune
+# or: /team prune --all
+```
+
 ## 4. Worker-side Smoke (verifying child process)
 
 To test the worker role directly:
