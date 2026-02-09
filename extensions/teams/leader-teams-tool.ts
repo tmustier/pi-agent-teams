@@ -5,9 +5,10 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { pickAgentNames, pickComradeNames, sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
+import { taskAssignmentPayload } from "./protocol.js";
 import { ensureTeamConfig } from "./team-config.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName } from "./teams-style.js";
-import { createTask, type TeamTask } from "./task-store.js";
+import { createTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 
@@ -60,11 +61,10 @@ export function registerTeamsTool(opts: {
 	teammates: Map<string, TeammateRpc>;
 	spawnTeammate: SpawnTeammateFn;
 	getTaskListId: () => string | null;
-	taskAssignmentPayload: (task: TeamTask, assignedBy: string) => unknown;
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
 }): void {
-	const { pi, teammates, spawnTeammate, getTaskListId, taskAssignmentPayload, refreshTasks, renderWidget } = opts;
+	const { pi, teammates, spawnTeammate, getTaskListId, refreshTasks, renderWidget } = opts;
 
 	pi.registerTool({
 		name: "teams",

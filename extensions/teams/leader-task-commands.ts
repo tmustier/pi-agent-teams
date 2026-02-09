@@ -3,6 +3,7 @@ import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
+import { taskAssignmentPayload } from "./protocol.js";
 import {
 	addTaskDependency,
 	clearTasks,
@@ -18,6 +19,15 @@ import { ensureTeamConfig } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName } from "./teams-style.js";
 
+function parseAssigneePrefix(text: string): { assignee?: string; text: string } {
+	const m = text.match(/^([a-zA-Z0-9_-]+):\s*(.+)$/);
+	if (!m) return { text };
+	const assignee = m[1];
+	const rest = m[2];
+	if (!assignee || !rest) return { text };
+	return { assignee, text: rest };
+}
+
 export async function handleTeamTaskCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
@@ -28,8 +38,6 @@ export async function handleTeamTaskCommand(opts: {
 	getTasks: () => TeamTask[];
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
-	parseAssigneePrefix: (text: string) => { assignee?: string; text: string };
-	taskAssignmentPayload: (task: TeamTask, assignedBy: string) => unknown;
 }): Promise<void> {
 	const {
 		ctx,
@@ -41,8 +49,6 @@ export async function handleTeamTaskCommand(opts: {
 		getTasks,
 		refreshTasks,
 		renderWidget,
-		parseAssigneePrefix,
-		taskAssignmentPayload,
 	} = opts;
 
 	const [taskSub, ...taskRest] = rest;

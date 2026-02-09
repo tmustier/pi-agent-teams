@@ -56,15 +56,6 @@ function shellQuote(v: string): string {
 	return "'" + v.replace(/'/g, `"'"'"'`) + "'";
 }
 
-function parseAssigneePrefix(text: string): { assignee?: string; text: string } {
-	const m = text.match(/^([a-zA-Z0-9_-]+):\s*(.+)$/);
-	if (!m) return { text };
-	const assignee = m[1];
-	const rest = m[2];
-	if (!assignee || !rest) return { text };
-	return { assignee, text: rest };
-}
-
 function getTeamSessionsDir(teamDir: string): string {
 	return path.join(teamDir, "sessions");
 }
@@ -116,17 +107,6 @@ async function createSessionForTeammate(
 		const fallback = SessionManager.create(ctx.cwd, teamSessionsDir);
 		return { sessionFile: fallback.getSessionFile(), note: "branch(error->fresh)", warnings };
 	}
-}
-
-function taskAssignmentPayload(task: TeamTask, assignedBy: string) {
-	return {
-		type: "task_assignment",
-		taskId: task.id,
-		subject: task.subject,
-		description: task.description,
-		assignedBy,
-		timestamp: new Date().toISOString(),
-	};
 }
 
 // Message parsers are shared with the worker implementation.
@@ -498,7 +478,6 @@ export function runLeader(pi: ExtensionAPI): void {
 		teammates,
 		spawnTeammate,
 		getTaskListId: () => taskListId,
-		taskAssignmentPayload,
 		refreshTasks,
 		renderWidget,
 	});
@@ -824,8 +803,6 @@ export function runLeader(pi: ExtensionAPI): void {
 						getTasks: () => tasks,
 						refreshTasks,
 						renderWidget,
-						parseAssigneePrefix,
-						taskAssignmentPayload,
 					});
 					return;
 				}

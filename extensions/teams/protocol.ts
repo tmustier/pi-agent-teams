@@ -1,4 +1,24 @@
+import type { TeamTask } from "./task-store.js";
+
 export const TEAM_MAILBOX_NS = "team";
+
+export function taskAssignmentPayload(task: TeamTask, assignedBy: string): {
+	type: "task_assignment";
+	taskId: string;
+	subject: string;
+	description: string;
+	assignedBy: string;
+	timestamp: string;
+} {
+	return {
+		type: "task_assignment",
+		taskId: task.id,
+		subject: task.subject,
+		description: task.description,
+		assignedBy,
+		timestamp: new Date().toISOString(),
+	};
+}
 
 function safeParseJson(text: string): unknown | null {
 	try {
