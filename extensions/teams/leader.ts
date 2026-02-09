@@ -35,10 +35,7 @@ import {
 	handleTeamStopCommand,
 	handleTeamStyleCommand,
 } from "./leader-lifecycle-commands.js";
-
-
-type ContextMode = "fresh" | "branch";
-type WorkspaceMode = "shared" | "worktree";
+import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode } from "./spawn-types.js";
 
 function getTeamsExtensionEntryPath(): string | null {
 	// In dev, teammates won't automatically have this extension unless it is installed or discoverable.
@@ -226,22 +223,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		currentCtx.ui.setWidget("pi-teams", widgetFactory);
 	};
 
-	type SpawnTeammateResult =
-		| {
-				ok: true;
-				name: string;
-				mode: ContextMode;
-				workspaceMode: WorkspaceMode;
-				childCwd: string;
-				note?: string;
-				warnings: string[];
-		  }
-		| { ok: false; error: string };
-
-	const spawnTeammate = async (
-		ctx: ExtensionContext,
-		opts: { name: string; mode?: ContextMode; workspaceMode?: WorkspaceMode; planRequired?: boolean },
-	): Promise<SpawnTeammateResult> => {
+	const spawnTeammate: SpawnTeammateFn = async (ctx, opts): Promise<SpawnTeammateResult> => {
 		const warnings: string[] = [];
 		const mode: ContextMode = opts.mode ?? "fresh";
 		let workspaceMode: WorkspaceMode = opts.workspaceMode ?? "shared";

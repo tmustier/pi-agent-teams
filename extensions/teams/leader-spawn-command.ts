@@ -1,32 +1,16 @@
-import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { pickComradeNames } from "./names.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings, isSovietStyle } from "./teams-style.js";
-
-export type ContextMode = "fresh" | "branch";
-export type WorkspaceMode = "shared" | "worktree";
-
-export type SpawnTeammateResult =
-	| {
-			ok: true;
-			name: string;
-			mode: ContextMode;
-			workspaceMode: WorkspaceMode;
-			note?: string;
-			warnings: string[];
-	  }
-	| { ok: false; error: string };
+import type { ContextMode, WorkspaceMode, SpawnTeammateFn, SpawnTeammateResult } from "./spawn-types.js";
 
 export async function handleTeamSpawnCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teammates: Map<string, TeammateRpc>;
 	style: TeamsStyle;
-	spawnTeammate: (
-		ctx: ExtensionContext,
-		opts: { name: string; mode?: ContextMode; workspaceMode?: WorkspaceMode; planRequired?: boolean },
-	) => Promise<SpawnTeammateResult>;
+	spawnTeammate: SpawnTeammateFn;
 }): Promise<void> {
 	const { ctx, rest, teammates, style, spawnTeammate } = opts;
 	const strings = getTeamsStrings(style);

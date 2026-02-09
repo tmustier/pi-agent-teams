@@ -1,7 +1,7 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { Type, type Static } from "@sinclair/typebox";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { pickAgentNames, pickComradeNames, sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
@@ -9,20 +9,9 @@ import { ensureTeamConfig } from "./team-config.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName } from "./teams-style.js";
 import { createTask, type TeamTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
-
-export type ContextMode = "fresh" | "branch";
-export type WorkspaceMode = "shared" | "worktree";
+import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 
 type TeamsToolDelegateTask = { text: string; assignee?: string };
-
-type SpawnTeammateResult =
-	| { ok: true; name: string; warnings: string[] }
-	| { ok: false; error: string };
-
-export type SpawnTeammateFn = (
-	ctx: ExtensionContext,
-	opts: { name: string; mode?: ContextMode; workspaceMode?: WorkspaceMode; planRequired?: boolean },
-) => Promise<SpawnTeammateResult>;
 
 const TeamsActionSchema = StringEnum(["delegate"] as const, {
 	description: "Teams tool action. Currently only 'delegate' is supported.",
