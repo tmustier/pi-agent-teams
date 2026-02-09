@@ -1,12 +1,14 @@
 {
   "name": "@tmustier/pi-agent-teams",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Claude Code agent teams style workflow for Pi.",
   "license": "MIT",
   "author": "Thomas Mustier",
   "private": false,
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tmustier/pi-agent-teams.git"
@@ -17,8 +19,12 @@
     "access": "public"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.strict.json",
