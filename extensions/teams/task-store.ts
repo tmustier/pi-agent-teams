@@ -328,6 +328,10 @@ export async function unassignTasksForAgent(
 		if (t.owner !== agentName) continue;
 		if (t.status === "completed") continue;
 		const updated = await updateTask(teamDir, taskListId, t.id, (cur) => {
+			// Re-check ownership under the per-task lock to avoid races with other claimers.
+			if (cur.owner !== agentName) return cur;
+			if (cur.status === "completed") return cur;
+
 			const metadata = { ...(cur.metadata ?? {}) };
 			if (reason) metadata.unassignedReason = reason;
 			metadata.unassignedAt = new Date().toISOString();
