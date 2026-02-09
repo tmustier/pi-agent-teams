@@ -26,8 +26,8 @@ export interface InteractiveWidgetDeps {
 	getStyle(): TeamsStyle;
 	isDelegateMode(): boolean;
 	sendMessage(name: string, message: string): Promise<void>;
-	abortComrade(name: string): void;
-	killComrade(name: string): void;
+	abortMember(name: string): void;
+	killMember(name: string): void;
 	suppressWidget(): void;
 	restoreWidget(): void;
 }
@@ -151,7 +151,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 
 				// ── Build row data (same logic as persistent widget) ──
 
-				function buildRows(): { rows: Row[]; comradeNames: string[] } {
+				function buildRows(): { rows: Row[]; memberNames: string[] } {
 					const teammates = deps.getTeammates();
 					const tracker = deps.getTracker();
 					const tasks = deps.getTasks();
@@ -181,8 +181,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					}
 
 					// Workers
-					const comradeNames = getVisibleWorkerNames({ teammates, teamConfig, tasks });
-					for (const name of comradeNames) {
+					const memberNames = getVisibleWorkerNames({ teammates, teamConfig, tasks });
+					for (const name of memberNames) {
 						const rpc = teammates.get(name);
 						const cfg = cfgByName.get(name);
 						const statusKey = resolveStatus(rpc, cfg);
@@ -203,7 +203,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						});
 					}
 
-					return { rows, comradeNames };
+					return { rows, memberNames };
 				}
 
 				// ── Overview render (identical to persistent widget + cursor) ──
@@ -212,10 +212,10 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const tasks = deps.getTasks();
 					const tracker = deps.getTracker();
 					const delegateMode = deps.isDelegateMode();
-					const { rows, comradeNames } = buildRows();
+					const { rows, memberNames } = buildRows();
 
 					// Clamp cursor
-					if (cursorIndex >= comradeNames.length) cursorIndex = Math.max(0, comradeNames.length - 1);
+					if (cursorIndex >= memberNames.length) cursorIndex = Math.max(0, memberNames.length - 1);
 
 					const lines: string[] = [];
 
@@ -236,7 +236,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						const totalPending = tasks.filter((t) => t.status === "pending").length;
 						const totalCompleted = tasks.filter((t) => t.status === "completed").length;
 						let totalTokensRaw = 0;
-						for (const name of comradeNames) totalTokensRaw += tracker.get(name).totalTokens;
+						for (const name of memberNames) totalTokensRaw += tracker.get(name).totalTokens;
 						const totalTokensStr = formatTokens(totalTokensRaw);
 
 						const nameColWidth = Math.max(...rows.map((r) => visibleWidth(r.displayName)));
@@ -255,7 +255,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 
 						// Render rows
 						for (const r of rows) {
-							const isSelected = !r.isChairman && comradeNames.indexOf(r.name) === cursorIndex;
+							const isSelected = !r.isChairman && memberNames.indexOf(r.name) === cursorIndex;
 							const pointer = isSelected ? theme.fg("accent", "\u25b8") : " ";
 							const icon = theme.fg(r.iconColor, r.icon);
 							const styledName = isSelected
@@ -548,7 +548,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							}
 							if (data === "a") {
 								if (sessionName) {
-									deps.abortComrade(sessionName);
+									deps.abortMember(sessionName);
 									showNotification(`Abort sent to ${formatMemberDisplayName(style, sessionName)}`, "warning");
 								}
 								return;
@@ -556,7 +556,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							if (data === "k") {
 								if (sessionName) {
 									const name = sessionName;
-									deps.killComrade(name);
+									deps.killMember(name);
 									showNotification(`${formatMemberDisplayName(style, name)} ${strings.killedVerb}`, "error");
 									mode = "overview";
 									sessionName = null;
@@ -568,7 +568,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						}
 
 						// ── Overview mode ──
-						const comradeNames = getVisibleWorkerNames({
+						const memberNames = getVisibleWorkerNames({
 							teammates: deps.getTeammates(),
 							teamConfig: deps.getTeamConfig(),
 							tasks: deps.getTasks(),
@@ -584,12 +584,12 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							return;
 						}
 						if (matchesKey(data, "down")) {
-							cursorIndex = Math.min(comradeNames.length - 1, cursorIndex + 1);
+							cursorIndex = Math.min(memberNames.length - 1, cursorIndex + 1);
 							tui.requestRender();
 							return;
 						}
 						if (matchesKey(data, "enter")) {
-							const name = comradeNames[cursorIndex];
+							const name = memberNames[cursorIndex];
 							if (name) {
 								sessionName = name;
 								mode = "session";
@@ -600,7 +600,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							return;
 						}
 						if (data === "m") {
-							const name = comradeNames[cursorIndex];
+							const name = memberNames[cursorIndex];
 							if (name) {
 								dmTarget = name;
 								mode = "dm";
@@ -610,17 +610,17 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							return;
 						}
 						if (data === "a") {
-							const name = comradeNames[cursorIndex];
+							const name = memberNames[cursorIndex];
 							if (name) {
-								deps.abortComrade(name);
+								deps.abortMember(name);
 								showNotification(`Abort sent to ${formatMemberDisplayName(style, name)}`, "warning");
 							}
 							return;
 						}
 						if (data === "k") {
-							const name = comradeNames[cursorIndex];
+							const name = memberNames[cursorIndex];
 							if (name) {
-								deps.killComrade(name);
+								deps.killMember(name);
 								showNotification(`${formatMemberDisplayName(style, name)} ${strings.killedVerb}`, "error");
 								tui.requestRender();
 							}

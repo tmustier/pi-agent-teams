@@ -144,8 +144,11 @@ export async function handleTeamShutdownCommand(opts: {
 	leadName: string;
 	style: TeamsStyle;
 	getCurrentCtx: () => ExtensionContext | null;
+	stopAllTeammates: (ctx: ExtensionContext, reason: string) => Promise<void>;
+	refreshTasks: () => Promise<void>;
+	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, leadName, style, getCurrentCtx } = opts;
+	const { ctx, rest, teammates, leadName, style, getCurrentCtx, stopAllTeammates, refreshTasks, renderWidget } = opts;
 	const strings = getTeamsStrings(style);
 	const nameRaw = rest[0];
 
@@ -216,21 +219,32 @@ export async function handleTeamShutdownCommand(opts: {
 		return;
 	}
 
-	// /team shutdown (no args) = shutdown leader + all teammates
-	// Only prompt in interactive TTY mode. In RPC mode, confirm() would require
-	// the host to send extension_ui_response messages.
+	// /team shutdown (no args) = stop all teammates but keep the leader session alive
+	if (teammates.size === 0) {
+		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to shut down`, "info");
+		return;
+	}
+
 	if (process.stdout.isTTY && process.stdin.isTTY) {
 		const msg =
 			style === "soviet"
-				? `Dissolve the ${strings.teamNoun} and dismiss all ${strings.memberTitle.toLowerCase()}s?`
-				: "Shutdown this team and stop all teammates?";
-		const ok = await ctx.ui.confirm("Shutdown", msg);
+				? `Dismiss all ${strings.memberTitle.toLowerCase()}s from the ${strings.teamNoun}?`
+				: `Stop all ${String(teammates.size)} teammate${teammates.size === 1 ? "" : "s"}?`;
+		const ok = await ctx.ui.confirm("Shutdown team", msg);
 		if (!ok) return;
 	}
-	// In RPC mode, shutdown is deferred until the next input line is handled.
-	// Teammates are stopped in the session_shutdown handler.
-	ctx.ui.notify("Shutdown requested", "info");
-	ctx.shutdown();
+
+	const reason =
+		style === "soviet"
+			? `The ${strings.teamNoun} is dissolved by the chairman`
+			: "Stopped by /team shutdown";
+	await stopAllTeammates(ctx, reason);
+	await refreshTasks();
+	renderWidget();
+	ctx.ui.notify(
+		`Team ended: all ${strings.memberTitle.toLowerCase()}s stopped (leader session remains active)`,
+		"info",
+	);
 }
 
 export async function handleTeamStopCommand(opts: {
@@ -244,7 +258,6 @@ export async function handleTeamStopCommand(opts: {
 	renderWidget: () => void;
 }): Promise<void> {
 	const { ctx, rest, teammates, leadName, style, refreshTasks, getTasks, renderWidget } = opts;
-	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	const reason = rest.slice(1).join(" ").trim();
@@ -300,7 +313,7 @@ export async function handleTeamKillCommand(opts: {
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, rest, teammates, taskListId, leadName, style, refreshTasks, renderWidget } = opts;
+	const { ctx, rest, teammates, taskListId, leadName: _leadName, style, refreshTasks, renderWidget } = opts;
 	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];

@@ -9,7 +9,7 @@ import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { listTasks, unassignTasksForAgent, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
-import { getTeamDir, getTeamsRootDir } from "./paths.js";
+import { getTeamDir } from "./paths.js";
 import { ensureWorktreeCwd } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
@@ -532,11 +532,11 @@ export function runLeader(pi: ExtensionAPI): void {
 					timestamp: new Date().toISOString(),
 				});
 			},
-			abortComrade(name: string) {
+			abortMember(name: string) {
 				const rpc = teammates.get(name);
 				if (rpc) void rpc.abort();
 			},
-			killComrade(name: string) {
+			killMember(name: string) {
 				const rpc = teammates.get(name);
 				if (!rpc) return;
 
@@ -702,6 +702,9 @@ export function runLeader(pi: ExtensionAPI): void {
 						leadName: teamConfig?.leadName ?? "team-lead",
 						style,
 						getCurrentCtx: () => currentCtx,
+						stopAllTeammates,
+						refreshTasks,
+						renderWidget,
 					});
 					return;
 				}
