@@ -68,7 +68,7 @@ export class TranscriptTracker {
 		if (ev.type === "tool_execution_end") {
 			const starts = this.toolStarts.get(name);
 			const startTs = starts?.get(ev.toolCallId);
-			const durationMs = startTs != null ? now - startTs : 0;
+			const durationMs = startTs === undefined ? 0 : now - startTs;
 			starts?.delete(ev.toolCallId);
 			log.push({ kind: "tool_end", toolName: ev.toolName, durationMs, timestamp: now });
 			return;
@@ -135,7 +135,7 @@ export class TranscriptTracker {
 			// Flush all complete lines, keep the last (potentially incomplete) part
 			for (let i = 0; i < parts.length - 1; i++) {
 				const part = parts[i];
-				if (part == null) continue;
+				if (part === undefined) continue;
 				const trimmed = part.trimEnd();
 				if (trimmed) log.push({ kind: "text", text: trimmed, timestamp });
 			}

@@ -3,7 +3,7 @@ import { pickComradeNames } from "./names.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings, isSovietStyle } from "./teams-style.js";
-import type { ContextMode, WorkspaceMode, SpawnTeammateFn, SpawnTeammateResult } from "./spawn-types.js";
+import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 
 export async function handleTeamSpawnCommand(opts: {
 	ctx: ExtensionCommandContext;

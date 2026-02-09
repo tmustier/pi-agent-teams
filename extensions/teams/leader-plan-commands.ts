@@ -4,7 +4,7 @@ import { sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
 import { TEAM_MAILBOX_NS } from "./protocol.js";
 import type { TeamsStyle } from "./teams-style.js";
-import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import { formatMemberDisplayName } from "./teams-style.js";
 
 export async function handleTeamPlanCommand(opts: {
 	ctx: ExtensionCommandContext;

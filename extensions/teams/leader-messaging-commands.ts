@@ -71,7 +71,6 @@ export async function handleTeamDmCommand(opts: {
 	style: TeamsStyle;
 }): Promise<void> {
 	const { ctx, rest, leadName, style } = opts;
-	const strings = getTeamsStrings(style);
 
 	const nameRaw = rest[0];
 	const msg = rest.slice(1).join(" ").trim();

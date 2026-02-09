@@ -27,25 +27,30 @@
     ]
   },
   "scripts": {
+    "lint": "eslint 'extensions/**/*.ts' 'scripts/**/*.ts' 'scripts/**/*.mts'",
     "typecheck": "tsc -p tsconfig.strict.json",
+    "check": "npm run typecheck && npm run lint",
     "smoke-test": "tsx scripts/smoke-test.mts",
     "integration-claim-test": "tsx scripts/integration-claim-test.mts",
     "integration-todo-test": "tsx scripts/integration-todo-test.mts"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
     "@mariozechner/pi-agent-core": "^0.52.8",
     "@mariozechner/pi-ai": "^0.52.8",
     "@mariozechner/pi-coding-agent": "^0.52.8",
     "@mariozechner/pi-tui": "^0.52.8",
     "@sinclair/typebox": "^0.34.48",
+    "eslint": "^9.39.2",
+    "tsx": "^4.20.5",
     "typescript": "^5.9.3",
-    "tsx": "^4.20.5"
+    "typescript-eslint": "^8.54.0"
   },
   "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-agent-core": "*",
     "@sinclair/typebox": "*"
   }
 }

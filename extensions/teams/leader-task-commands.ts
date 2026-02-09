@@ -3,7 +3,6 @@ import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
-import { TEAM_MAILBOX_NS } from "./protocol.js";
 import {
 	addTaskDependency,
 	clearTasks,
@@ -17,7 +16,7 @@ import {
 } from "./task-store.js";
 import { ensureTeamConfig } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
-import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import { formatMemberDisplayName } from "./teams-style.js";
 
 export async function handleTeamTaskCommand(opts: {
 	ctx: ExtensionCommandContext;
@@ -45,7 +44,6 @@ export async function handleTeamTaskCommand(opts: {
 		parseAssigneePrefix,
 		taskAssignmentPayload,
 	} = opts;
-	const strings = getTeamsStrings(style);
 
 	const [taskSub, ...taskRest] = rest;
 	const teamId = ctx.sessionManager.getSessionId();

@@ -4,7 +4,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
-import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import { getTeamsStyleFromEnv, type TeamsStyle, getTeamsStrings } from "./teams-style.js";
 import {
 	TEAM_MAILBOX_NS,
 	isAbortRequestMessage,
