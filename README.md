@@ -20,16 +20,39 @@ Additional Pi-specific capabilities:
 - **Git worktrees** — optionally give each teammate its own worktree so they work on isolated branches without conflicting edits.
 - **Session branching** — clone the leader's conversation context into a teammate so it starts with full awareness of the work so far, instead of from scratch.
 
-## UI style
+## UI style (terminology + naming)
 
-The extension supports two UI styles:
+Built-in styles:
 
-- **normal** (default): "Team leader" + "Teammate <name>"
-- **soviet**: "Chairman" + "Comrade <name>" (in soviet mode, the system decides names for you)
+- **normal** (default): "Team leader" + "Teammate <name>" (spawn requires explicit name)
+- **soviet**: "Chairman" + "Comrade <name>" (spawn can auto-pick names)
+- **pirate**: "Captain" + "Matey <name>" (spawn can auto-pick names)
 
 Configure via:
-- env: `PI_TEAMS_STYLE=normal|soviet`
-- command: `/team style normal` or `/team style soviet`
+- env: `PI_TEAMS_STYLE=<name>`
+- command: `/team style <name>` (see: `/team style list`)
+
+### Custom styles
+
+You can add your own styles by creating JSON files under:
+
+- `~/.pi/agent/teams/_styles/<style>.json`
+
+The file can override strings and naming rules. Example:
+
+```json
+{
+  "extends": "pirate",
+  "strings": {
+    "memberTitle": "Deckhand",
+    "memberPrefix": "Deckhand "
+  },
+  "naming": {
+    "requireExplicitSpawnName": false,
+    "autoNameStrategy": { "kind": "pool", "pool": ["pegleg", "parrot"], "fallbackBase": "deckhand" }
+  }
+}
+```
 
 ## Install
 
@@ -117,7 +140,9 @@ All management commands live under `/team`.
 | `/team spawn <name> [fresh\|branch] [shared\|worktree]` | Start a teammate |
 | `/team list` | List teammates and their status |
 | `/team panel` | Interactive widget panel (same as `/tw`) |
-| `/team style <normal\|soviet>` | Set UI style (normal/soviet) |
+| `/team style` | Show current style + usage |
+| `/team style list` | List available styles (built-in + custom) |
+| `/team style <name>` | Set style (built-in or custom) |
 | `/team send <name> <msg>` | Send a prompt over RPC |
 | `/team steer <name> <msg>` | Redirect an in-flight run |
 | `/team dm <name> <msg>` | Send a mailbox message |
@@ -151,7 +176,7 @@ All management commands live under `/team`.
 | --- | --- | --- |
 | `PI_TEAMS_ROOT_DIR` | Storage root (absolute or relative to `~/.pi/agent`) | `~/.pi/agent/teams` |
 | `PI_TEAMS_DEFAULT_AUTO_CLAIM` | Whether spawned teammates auto-claim tasks | `1` (on) |
-| `PI_TEAMS_STYLE` | UI style (`normal` or `soviet`) | `normal` |
+| `PI_TEAMS_STYLE` | UI style id (built-in: `normal`, `soviet`, `pirate`, or custom) | `normal` |
 
 ## Storage layout
 

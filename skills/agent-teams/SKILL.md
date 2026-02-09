@@ -14,13 +14,16 @@ Spawn and coordinate teammate agents that work in parallel on shared task lists,
 - **Task list**: file-per-task store with statuses (pending/in_progress/completed), owners, and dependency tracking.
 - **Mailbox**: file-based message queue. Two namespaces: `team` (DMs, notifications, shutdown) and `taskListId` (task assignments).
 
-## UI style
+## UI style (terminology + naming)
 
-Two styles:
+Built-in styles:
 - `normal` (default): Team leader + Teammate <name>
-- `soviet`: Chairman + Comrade <name> (in soviet mode, the system decides names for you)
+- `soviet`: Chairman + Comrade <name>
+- `pirate`: Captain + Matey <name>
 
-Configure via `PI_TEAMS_STYLE=normal|soviet` or `/team style <normal|soviet>`.
+Configure via `PI_TEAMS_STYLE=<name>` or `/team style <name>` (see `/team style list`).
+
+Custom styles can be added via JSON files under `~/.pi/agent/teams/_styles/<style>.json`.
 
 ## Spawning teammates
 

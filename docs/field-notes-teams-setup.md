@@ -4,7 +4,7 @@ Date: 2026-02-07
 
 Goal: dogfood the Teams extension to implement its own roadmap (Claude parity), and capture anything that surprised/confused us while setting it up.
 
-> Terminology note: the extension supports `PI_TEAMS_STYLE=normal|soviet`. In normal style the UI says "teammate" and "team leader"; in soviet style it says "comrade" and "chairman".
+> Terminology note: the extension supports `PI_TEAMS_STYLE=<style>`. Built-ins: `normal`, `soviet`, `pirate`. You can also add custom styles via `~/.pi/agent/teams/_styles/<style>.json`.
 
 ## Test run: test1
 
