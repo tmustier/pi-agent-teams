@@ -611,8 +611,11 @@ export function runLeader(pi: ExtensionAPI): void {
 				return;
 			}
 
-			switch (sub) {
-				case "list": {
+			const leadName = teamConfig?.leadName ?? "team-lead";
+
+			type TeamSubcommandHandler = () => Promise<void>;
+			const handlers: Record<string, TeamSubcommandHandler> = {
+				list: async () => {
 					await handleTeamListCommand({
 						ctx,
 						teammates,
@@ -621,33 +624,30 @@ export function runLeader(pi: ExtensionAPI): void {
 						refreshTasks,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "id": {
+				id: async () => {
 					await handleTeamIdCommand({
 						ctx,
 						taskListId,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 					});
-					return;
-				}
+				},
 
-				case "env": {
+				env: async () => {
 					await handleTeamEnvCommand({
 						ctx,
 						rest,
 						taskListId,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						getTeamsExtensionEntryPath,
 						shellQuote,
 					});
-					return;
-				}
+				},
 
-				case "cleanup": {
+				cleanup: async () => {
 					await handleTeamCleanupCommand({
 						ctx,
 						rest,
@@ -657,10 +657,9 @@ export function runLeader(pi: ExtensionAPI): void {
 						renderWidget,
 						style,
 					});
-					return;
-				}
+				},
 
-				case "delegate": {
+				delegate: async () => {
 					await handleTeamDelegateCommand({
 						ctx,
 						rest,
@@ -670,30 +669,27 @@ export function runLeader(pi: ExtensionAPI): void {
 						},
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "shutdown": {
+				shutdown: async () => {
 					await handleTeamShutdownCommand({
 						ctx,
 						rest,
 						teammates,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						getCurrentCtx: () => currentCtx,
 						stopAllTeammates,
 						refreshTasks,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "spawn": {
+				spawn: async () => {
 					await handleTeamSpawnCommand({ ctx, rest, teammates, style, spawnTeammate });
-					return;
-				}
+				},
 
-				case "style": {
+				style: async () => {
 					const teamId = ctx.sessionManager.getSessionId();
 					const teamDir = getTeamDir(teamId);
 					await handleTeamStyleCommand({
@@ -707,16 +703,13 @@ export function runLeader(pi: ExtensionAPI): void {
 						refreshTasks,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "panel":
-				case "widget": {
+				panel: async () => {
 					await openWidget(ctx);
-					return;
-				}
+				},
 
-				case "send": {
+				send: async () => {
 					await handleTeamSendCommand({
 						ctx,
 						rest,
@@ -724,10 +717,9 @@ export function runLeader(pi: ExtensionAPI): void {
 						style,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "steer": {
+				steer: async () => {
 					await handleTeamSteerCommand({
 						ctx,
 						rest,
@@ -735,66 +727,61 @@ export function runLeader(pi: ExtensionAPI): void {
 						style,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "stop": {
+				stop: async () => {
 					await handleTeamStopCommand({
 						ctx,
 						rest,
 						teammates,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						refreshTasks,
 						getTasks: () => tasks,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "kill": {
+				kill: async () => {
 					await handleTeamKillCommand({
 						ctx,
 						rest,
 						teammates,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						taskListId,
 						refreshTasks,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "dm": {
+				dm: async () => {
 					await handleTeamDmCommand({
 						ctx,
 						rest,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 					});
-					return;
-				}
+				},
 
-				case "broadcast": {
+				broadcast: async () => {
 					await handleTeamBroadcastCommand({
 						ctx,
 						rest,
 						teammates,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						refreshTasks,
 						getTasks: () => tasks,
 						getTaskListId: () => taskListId,
 					});
-					return;
-				}
+				},
 
-				case "task": {
+				task: async () => {
 					await handleTeamTaskCommand({
 						ctx,
 						rest,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						getTaskListId: () => taskListId,
 						setTaskListId: (id) => {
@@ -804,25 +791,26 @@ export function runLeader(pi: ExtensionAPI): void {
 						refreshTasks,
 						renderWidget,
 					});
-					return;
-				}
+				},
 
-				case "plan": {
+				plan: async () => {
 					await handleTeamPlanCommand({
 						ctx,
 						rest,
-						leadName: teamConfig?.leadName ?? "team-lead",
+						leadName,
 						style,
 						pendingPlanApprovals,
 					});
-					return;
-				}
+				},
+			};
 
-				default: {
-					ctx.ui.notify(`Unknown subcommand: ${sub}`, "error");
-					return;
-				}
+			const normalizedSub = sub === "widget" ? "panel" : sub;
+			const handler = handlers[normalizedSub];
+			if (!handler) {
+				ctx.ui.notify(`Unknown subcommand: ${sub}`, "error");
+				return;
 			}
+			await handler();
 		},
 	});
 }
