@@ -10,20 +10,17 @@
  *   npx tsx scripts/integration-claim-test.mts --agents 2 --tasks 3 --timeoutSec 90
  */
 
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import type { ChildProcess } from "node:child_process";
 
 import { ensureTeamConfig } from "../extensions/teams/team-config.js";
 import { getTeamDir } from "../extensions/teams/paths.js";
 import { createTask, listTasks, type TeamTask } from "../extensions/teams/task-store.js";
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((r) => setTimeout(r, ms));
-}
+import { sleep, spawnTeamsWorkerRpc, terminateAll } from "./lib/pi-workers.js";
 
 function parseArgs(argv: readonly string[]): { agents: number; tasks: number; timeoutSec: number } {
 	let agents = 2;
@@ -63,85 +60,6 @@ function allCompleted(ts: TeamTask[]): boolean {
 	return ts.length > 0 && ts.every((t) => t.status === "completed");
 }
 
-async function terminateAll(children: ChildProcess[]): Promise<void> {
-	for (const c of children) {
-		try {
-			c.kill("SIGTERM");
-		} catch {
-			// ignore
-		}
-	}
-
-	// Give them a moment to flush + exit.
-	const deadline = Date.now() + 10_000;
-	for (const c of children) {
-		while (c.exitCode === null && Date.now() < deadline) {
-			await sleep(100);
-		}
-		if (c.exitCode === null) {
-			try {
-				c.kill("SIGKILL");
-			} catch {
-				// ignore
-			}
-		}
-	}
-}
-
-function spawnWorker(opts: {
-	repoRoot: string;
-	entryPath: string;
-	sessionsDir: string;
-	teamId: string;
-	agentName: string;
-	logDir: string;
-}): ChildProcess {
-	const { repoRoot, entryPath, sessionsDir, teamId, agentName, logDir } = opts;
-
-	fs.mkdirSync(logDir, { recursive: true });
-	fs.mkdirSync(sessionsDir, { recursive: true });
-
-	const sessionFile = path.join(sessionsDir, `${agentName}.jsonl`);
-	fs.closeSync(fs.openSync(sessionFile, "a"));
-
-	const logPath = path.join(logDir, `${agentName}.log`);
-	const out = fs.openSync(logPath, "a");
-	const err = fs.openSync(logPath, "a");
-
-	const args = [
-		"--mode",
-		"rpc",
-		"--session",
-		sessionFile,
-		"--session-dir",
-		sessionsDir,
-		"--no-extensions",
-		"-e",
-		entryPath,
-		"--append-system-prompt",
-		["You are a teammate in an automated integration test.",
-			"Keep replies extremely short.",
-			"If you are assigned or auto-claim a task that says 'Reply with: okX', respond with exactly 'okX' and nothing else.",
-		].join(" "),
-	];
-
-	return spawn("pi", args, {
-		cwd: repoRoot,
-		env: {
-			...process.env,
-			PI_TEAMS_WORKER: "1",
-			PI_TEAMS_TEAM_ID: teamId,
-			PI_TEAMS_TASK_LIST_ID: teamId,
-			PI_TEAMS_AGENT_NAME: agentName,
-			PI_TEAMS_LEAD_NAME: "team-lead",
-			PI_TEAMS_STYLE: "normal",
-			PI_TEAMS_AUTO_CLAIM: "1",
-			PI_TEAMS_PLAN_REQUIRED: "0",
-		},
-		stdio: ["ignore", out, err],
-	});
-}
-
 const { agents, tasks, timeoutSec } = parseArgs(process.argv.slice(2));
 
 if (agents < 2 || tasks < 3) {
@@ -157,6 +75,12 @@ const logsDir = path.join(os.homedir(), ".pi", "agent", "teams", teamId, "logs")
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const entryPath = path.join(repoRoot, "extensions", "teams", "index.ts");
+
+const systemAppend = [
+	"You are a teammate in an automated integration test.",
+	"Keep replies extremely short.",
+	"If you are assigned or auto-claim a task that says 'Reply with: okX', respond with exactly 'okX' and nothing else.",
+].join(" ");
 
 console.log(`TeamId: ${teamId}`);
 console.log(`TeamDir: ${teamDir}`);
@@ -190,12 +114,18 @@ process.on("SIGTERM", () => {
 try {
 	for (let i = 1; i <= agents; i += 1) {
 		children.push(
-			spawnWorker({
-				repoRoot,
+			spawnTeamsWorkerRpc({
+				cwd: repoRoot,
 				entryPath,
 				sessionsDir,
 				teamId,
+				taskListId: teamId,
 				agentName: `agent${i}`,
+				leadName: "team-lead",
+				style: "normal",
+				autoClaim: true,
+				planRequired: false,
+				systemAppend,
 				logDir: logsDir,
 			}),
 		);

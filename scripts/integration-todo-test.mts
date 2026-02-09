@@ -17,7 +17,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -31,9 +31,7 @@ import {
 	type TeamTask,
 } from "../extensions/teams/task-store.js";
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((r) => setTimeout(r, ms));
-}
+import { sleep, spawnTeamsWorkerRpc, terminateAll } from "./lib/pi-workers.js";
 
 function parseArgs(argv: readonly string[]): { timeoutSec: number; pollMs: number } {
 	let timeoutSec = 15 * 60;
@@ -60,30 +58,6 @@ function parseArgs(argv: readonly string[]): { timeoutSec: number; pollMs: numbe
 	return { timeoutSec, pollMs };
 }
 
-async function terminateAll(children: ChildProcess[]): Promise<void> {
-	for (const c of children) {
-		try {
-			c.kill("SIGTERM");
-		} catch {
-			// ignore
-		}
-	}
-
-	const deadline = Date.now() + 10_000;
-	for (const c of children) {
-		while (c.exitCode === null && Date.now() < deadline) {
-			await sleep(100);
-		}
-		if (c.exitCode === null) {
-			try {
-				c.kill("SIGKILL");
-			} catch {
-				// ignore
-			}
-		}
-	}
-}
-
 function spawnWorker(opts: {
 	cwd: string;
 	repoRoot: string;
@@ -93,17 +67,7 @@ function spawnWorker(opts: {
 	agentName: string;
 	logDir: string;
 }): ChildProcess {
-	const { cwd, repoRoot, entryPath, sessionsDir, teamId, agentName, logDir } = opts;
-
-	fs.mkdirSync(logDir, { recursive: true });
-	fs.mkdirSync(sessionsDir, { recursive: true });
-
-	const sessionFile = path.join(sessionsDir, `${agentName}.jsonl`);
-	fs.closeSync(fs.openSync(sessionFile, "a"));
-
-	const logPath = path.join(logDir, `${agentName}.log`);
-	const out = fs.openSync(logPath, "a");
-	const err = fs.openSync(logPath, "a");
+	const { cwd, entryPath, sessionsDir, teamId, agentName, logDir } = opts;
 
 	const systemAppend = [
 		"You are a teammate in an automated integration test.",
@@ -112,34 +76,19 @@ function spawnWorker(opts: {
 		"Always end with: ACCEPTED: <one-line acceptance confirmation>.",
 	].join(" ");
 
-	const args = [
-		"--mode",
-		"rpc",
-		"--session",
-		sessionFile,
-		"--session-dir",
-		sessionsDir,
-		"--no-extensions",
-		"-e",
-		entryPath,
-		"--append-system-prompt",
-		systemAppend,
-	];
-
-	return spawn("pi", args, {
+	return spawnTeamsWorkerRpc({
 		cwd,
-		env: {
-			...process.env,
-			PI_TEAMS_WORKER: "1",
-			PI_TEAMS_TEAM_ID: teamId,
-			PI_TEAMS_TASK_LIST_ID: teamId,
-			PI_TEAMS_AGENT_NAME: agentName,
-			PI_TEAMS_LEAD_NAME: "team-lead",
-			PI_TEAMS_STYLE: "normal",
-			PI_TEAMS_AUTO_CLAIM: "1",
-			PI_TEAMS_PLAN_REQUIRED: "0",
-		},
-		stdio: ["ignore", out, err],
+		entryPath,
+		sessionsDir,
+		teamId,
+		taskListId: teamId,
+		agentName,
+		leadName: "team-lead",
+		style: "normal",
+		autoClaim: true,
+		planRequired: false,
+		systemAppend,
+		logDir,
 	});
 }
 
