@@ -549,7 +549,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							if (data === "a") {
 								if (sessionName) {
 									deps.abortMember(sessionName);
-									showNotification(`Abort sent to ${formatMemberDisplayName(style, sessionName)}`, "warning");
+									showNotification(`${formatMemberDisplayName(style, sessionName)} ${strings.abortRequestedVerb}`, "warning");
 								}
 								return;
 							}
@@ -613,7 +613,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							const name = memberNames[cursorIndex];
 							if (name) {
 								deps.abortMember(name);
-								showNotification(`Abort sent to ${formatMemberDisplayName(style, name)}`, "warning");
+								showNotification(`${formatMemberDisplayName(style, name)} ${strings.abortRequestedVerb}`, "warning");
 							}
 							return;
 						}

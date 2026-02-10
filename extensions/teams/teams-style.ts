@@ -23,6 +23,17 @@ export type TeamsStrings = {
 	joinedVerb: string;
 	leftVerb: string;
 	killedVerb: string;
+
+	// Lifecycle copy (all shown as "<member> <verb...>")
+	shutdownRequestedVerb: string;
+	shutdownCompletedVerb: string;
+	shutdownRefusedVerb: string;
+	abortRequestedVerb: string;
+
+	// Templates (supports {members} and/or {count})
+	noMembersToShutdown: string;
+	shutdownAllPrompt: string;
+	teamEndedAllStopped: string;
 };
 
 export type TeamsAutoNameStrategy =
@@ -44,6 +55,10 @@ export type TeamsStyleDefinition = {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null;
+}
+
+export function formatTeamsTemplate(template: string, vars: Record<string, string>): string {
+	return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, key: string) => vars[key] ?? "");
 }
 
 export function normalizeTeamsStyleId(raw: unknown): TeamsStyle | null {
@@ -71,6 +86,15 @@ function builtinStyle(id: BuiltinTeamsStyle): TeamsStyleDefinition {
 				joinedVerb: "has joined the Party",
 				leftVerb: "has left the Party",
 				killedVerb: "sent to the gulag",
+
+				shutdownRequestedVerb: "was asked to stand down",
+				shutdownCompletedVerb: "stood down",
+				shutdownRefusedVerb: "refused to comply",
+				abortRequestedVerb: "was ordered to stop",
+
+				noMembersToShutdown: "No {members} to shut down",
+				shutdownAllPrompt: "Stop all {count} {members}?",
+				teamEndedAllStopped: "Team ended: all {members} stopped (leader session remains active)",
 			},
 			naming: {
 				requireExplicitSpawnName: false,
@@ -90,6 +114,15 @@ function builtinStyle(id: BuiltinTeamsStyle): TeamsStyleDefinition {
 				joinedVerb: "joined the crew",
 				leftVerb: "abandoned ship",
 				killedVerb: "walked the plank",
+
+				shutdownRequestedVerb: "was ordered to strike the colors",
+				shutdownCompletedVerb: "struck their colors",
+				shutdownRefusedVerb: "defied the captain",
+				abortRequestedVerb: "was ordered to belay that",
+
+				noMembersToShutdown: "No {members} to send below decks",
+				shutdownAllPrompt: "Dismiss all {count} {members}?",
+				teamEndedAllStopped: "Crew dismissed: all {members} struck their colors (leader session remains active)",
 			},
 			naming: {
 				requireExplicitSpawnName: false,
@@ -110,6 +143,15 @@ function builtinStyle(id: BuiltinTeamsStyle): TeamsStyleDefinition {
 			joinedVerb: "joined the team",
 			leftVerb: "left the team",
 			killedVerb: "stopped",
+
+			shutdownRequestedVerb: "was asked to shut down",
+			shutdownCompletedVerb: "shut down",
+			shutdownRefusedVerb: "refused to shut down",
+			abortRequestedVerb: "was asked to stop",
+
+			noMembersToShutdown: "No {members} to shut down",
+			shutdownAllPrompt: "Stop all {count} {members}?",
+			teamEndedAllStopped: "Team ended: all {members} stopped (leader session remains active)",
 		},
 		naming: {
 			requireExplicitSpawnName: true,
@@ -151,6 +193,13 @@ function coerceStringsPartial(obj: unknown): Partial<TeamsStrings> {
 		"joinedVerb",
 		"leftVerb",
 		"killedVerb",
+		"shutdownRequestedVerb",
+		"shutdownCompletedVerb",
+		"shutdownRefusedVerb",
+		"abortRequestedVerb",
+		"noMembersToShutdown",
+		"shutdownAllPrompt",
+		"teamEndedAllStopped",
 	];
 	for (const k of keys) {
 		const v = obj[k];

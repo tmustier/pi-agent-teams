@@ -16,6 +16,7 @@ import {
 	listAvailableTeamsStyles,
 	normalizeTeamsStyleId,
 	resolveTeamsStyleDefinition,
+	formatTeamsTemplate,
 } from "./teams-style.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 
@@ -101,20 +102,11 @@ export async function handleTeamStyleCommand(opts: {
 		const file = path.join(dir, `${styleId}.json`);
 		try {
 			await fs.promises.mkdir(dir, { recursive: true });
+			const base = resolveTeamsStyleDefinition(extendsId);
 			const template = {
 				extends: extendsId,
-				strings: {
-					memberTitle: "Member",
-					memberPrefix: "Member ",
-				},
-				naming: {
-					requireExplicitSpawnName: false,
-					autoNameStrategy: {
-						kind: "pool",
-						pool: ["member1", "member2"],
-						fallbackBase: "member",
-					},
-				},
+				strings: base.strings,
+				naming: base.naming,
 			};
 			await fs.promises.writeFile(file, JSON.stringify(template, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
 		} catch (err) {
@@ -295,7 +287,7 @@ export async function handleTeamShutdownCommand(opts: {
 			},
 		});
 
-		ctx.ui.notify(`Shutdown requested for ${formatMemberDisplayName(style, name)}`, "info");
+		ctx.ui.notify(`${formatMemberDisplayName(style, name)} ${strings.shutdownRequestedVerb}`, "info");
 
 		// Optional fallback for RPC teammates: force stop if it doesn't exit.
 		const t = teammates.get(name);
@@ -333,13 +325,18 @@ export async function handleTeamShutdownCommand(opts: {
 	for (const m of cfgWorkersOnline) activeNames.add(m.name);
 
 	if (activeNames.size === 0) {
-		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to shut down`, "info");
+		const members = `${strings.memberTitle.toLowerCase()}s`;
+		ctx.ui.notify(formatTeamsTemplate(strings.noMembersToShutdown, { members, count: "0" }), "info");
 		return;
 	}
 
 	if (process.stdout.isTTY && process.stdin.isTTY) {
 		const plural = activeNames.size === 1 ? "" : "s";
-		const msg = `Stop all ${String(activeNames.size)} ${strings.memberTitle.toLowerCase()}${plural}?`;
+		const members = `${strings.memberTitle.toLowerCase()}${plural}`;
+		const msg = formatTeamsTemplate(strings.shutdownAllPrompt, {
+			count: String(activeNames.size),
+			members,
+		});
 		const ok = await ctx.ui.confirm("Shutdown team", msg);
 		if (!ok) return;
 	}
@@ -391,10 +388,8 @@ export async function handleTeamShutdownCommand(opts: {
 	}
 
 	renderWidget();
-	ctx.ui.notify(
-		`Team ended: all ${strings.memberTitle.toLowerCase()}s stopped (leader session remains active)`,
-		"info",
-	);
+	const members = `${strings.memberTitle.toLowerCase()}s`;
+	ctx.ui.notify(formatTeamsTemplate(strings.teamEndedAllStopped, { members, count: String(activeNames.size) }), "info");
 }
 
 export async function handleTeamPruneCommand(opts: {
@@ -517,10 +512,10 @@ export async function handleTeamStopCommand(opts: {
 		await t.abort();
 	}
 
-	ctx.ui.notify(
-		`Abort requested for ${formatMemberDisplayName(style, name)}${taskId ? ` (task #${taskId})` : ""}${t ? "" : " (mailbox only)"}`,
-		"warning",
-	);
+	let msg = `${formatMemberDisplayName(style, name)} ${getTeamsStrings(style).abortRequestedVerb}`;
+	if (taskId) msg += ` (task #${taskId})`;
+	if (!t) msg += " (mailbox only)";
+	ctx.ui.notify(msg, "warning");
 	renderWidget();
 }
 

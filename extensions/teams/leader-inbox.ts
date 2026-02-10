@@ -55,7 +55,7 @@ export async function pollLeaderInbox(opts: {
 					shutdownApprovedAt: approved.timestamp ?? new Date().toISOString(),
 				},
 			});
-			ctx.ui.notify(`${formatMemberDisplayName(style, name)} shut down`, "info");
+			ctx.ui.notify(`${formatMemberDisplayName(style, name)} ${strings.shutdownCompletedVerb}`, "info");
 			continue;
 		}
 
@@ -69,7 +69,7 @@ export async function pollLeaderInbox(opts: {
 					shutdownRejectedReason: rejected.reason,
 				},
 			});
-			ctx.ui.notify(`${formatMemberDisplayName(style, name)} refused shutdown: ${rejected.reason}`, "warning");
+			ctx.ui.notify(`${formatMemberDisplayName(style, name)} ${strings.shutdownRefusedVerb}: ${rejected.reason}`, "warning");
 			continue;
 		}
 

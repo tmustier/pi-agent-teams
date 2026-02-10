@@ -38,7 +38,11 @@ You can add your own styles by creating JSON files under:
 
 - `~/.pi/agent/teams/_styles/<style>.json`
 
-The file can override strings and naming rules. Example:
+The file can override strings and naming rules.
+
+Strings include both terminology **and lifecycle copy**, e.g. `killedVerb`, `shutdownRequestedVerb`, `shutdownCompletedVerb`, `shutdownRefusedVerb`, `abortRequestedVerb`, plus templates like `teamEndedAllStopped`.
+
+Example:
 
 ```json
 {
