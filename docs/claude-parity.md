@@ -54,7 +54,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Shutdown handshake | Lead requests shutdown; comrade can approve/reject | ✅ | Protocol: `shutdown_request` → `shutdown_approved` / `shutdown_rejected`. `/team shutdown <name>` (graceful), `/team kill <name>` (SIGTERM). Wording is style-controlled (e.g. “was asked to shut down”, “walked the plank”). | P1 |
 | Cleanup team | “Clean up the team” removes shared resources after comrades stopped | ✅ | `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks. | P1 |
 | Hooks / quality gates | `ComradeIdle`, `TaskCompleted` hooks | 🟡 | Optional leader-side hook runner (idle/task-complete/task-fail) via `PI_TEAMS_HOOKS_ENABLED=1` + scripts under `_hooks/`. Still missing richer gating UX + standardized hook contract. | P2 |
-| Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` + `/team task show` + `/team task clear`; panel supports `t`/`ctrl+t` toggle into task-centric view. | P0 |
+| Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` + `/team task show` + `/team task clear`; panel supports fast `t`/`tab` toggle into task-centric view (`Ctrl+T` is reserved by Pi for thinking blocks). | P0 |
 | Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | ✅ | Worker env: `PI_TEAMS_TASK_LIST_ID` (manual workers). Leader: `/team task use <taskListId>` (persisted). Newly spawned workers inherit; existing workers need restart. | P1 |
 | Join/attach flow | Join existing team context from another running session | 🟡 | `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach` plus claim heartbeat/takeover handshake added. Widget/panel now show attached-mode banner + detach hint. | P2 |
 
@@ -109,7 +109,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 11) **Better comrade interaction UX (within Pi constraints)** 🟡 (partial)
    - Implemented: panel overview shows selected teammate context (active/last completed task + last transcript event).
    - Implemented: faster keyboard controls (`w/s`, `1-9`, `m/d`).
-   - Implemented: task-centric panel mode (`t`/`ctrl+t`) with owned-task drilldown, dependency/block visibility, and quick jump back to transcript.
+   - Implemented: task-centric panel mode (`t`/`tab`) with owned-task drilldown, dependency/block visibility, and quick jump back to transcript (`Ctrl+T` reserved by Pi).
    - Implemented: in-panel task mutations for selected task (`c` complete, `p` pending, `i` in-progress, `u` unassign).
    - Implemented: in-panel reassignment flow (`r`) with teammate picker.
    - Implemented: agent-invocable task mutations via `teams` tool (`task_assign`, `task_unassign`, `task_set_status`) so flows do not require manual panel interaction.
