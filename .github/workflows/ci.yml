@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      run_integration_hooks_remediation:
+        description: "Run optional hooks remediation integration test"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
@@ -31,3 +37,36 @@ jobs:
 
       - name: Package (dry run)
         run: npm pack --dry-run
+
+  integration-hooks-remediation:
+    needs: typecheck-and-smoke
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_integration_hooks_remediation == true || inputs.run_integration_hooks_remediation == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Check pi CLI availability
+        id: pi
+        shell: bash
+        run: |
+          if command -v pi >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping integration-hooks-remediation-test because 'pi' is not installed on this runner."
+          fi
+
+      - name: Integration hooks remediation test
+        if: ${{ steps.pi.outputs.available == 'true' }}
+        run: npm run integration-hooks-remediation-test -- --timeoutSec 180
