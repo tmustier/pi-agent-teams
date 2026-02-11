@@ -240,6 +240,8 @@ All management commands live under `/team`.
 | `PI_TEAMS_HOOKS_DIR` | Hooks directory (absolute or relative to `PI_TEAMS_ROOT_DIR`) | `<teamsRoot>/_hooks` |
 | `PI_TEAMS_HOOK_TIMEOUT_MS` | Hook execution timeout (ms) | `60000` |
 | `PI_TEAMS_HOOKS_FAILURE_ACTION` | Hook-failure policy: `warn`, `followup`, `reopen`, `reopen_followup` | `warn` |
+| `PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK` | Reopen cap per task when failure action includes `reopen` (`0` disables auto-reopen) | `3` |
+| `PI_TEAMS_HOOKS_FOLLOWUP_OWNER` | Follow-up owner policy: `member`, `lead`, `none` | `member` |
 | `PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE` | Legacy shortcut for `PI_TEAMS_HOOKS_FAILURE_ACTION=followup` | `0` (off) |
 
 ## Storage layout
@@ -282,6 +284,8 @@ Recognized hook names:
 Hooks run with working directory = the **leader session cwd** and receive context via env vars:
 
 - `PI_TEAMS_HOOK_EVENT`
+- `PI_TEAMS_HOOK_CONTEXT_VERSION` (currently `1`)
+- `PI_TEAMS_HOOK_CONTEXT_JSON` (stable JSON payload for agent scripts)
 - `PI_TEAMS_TEAM_ID`, `PI_TEAMS_TEAM_DIR`, `PI_TEAMS_TASK_LIST_ID`
 - `PI_TEAMS_STYLE`
 - `PI_TEAMS_MEMBER`
@@ -290,18 +294,30 @@ Hooks run with working directory = the **leader session cwd** and receive contex
 Hook failure policy (for `task_completed` / `task_failed` hooks):
 
 ```bash
-# default behavior: only notify + annotate task metadata
+# default behavior: notify + annotate task metadata
 export PI_TEAMS_HOOKS_FAILURE_ACTION=warn
 
-# create follow-up task (legacy-compatible behavior)
+# create follow-up remediation task
 export PI_TEAMS_HOOKS_FAILURE_ACTION=followup
 
-# reopen the completed task to pending (re-blocks downstream dependencies)
+# reopen completed task to pending (re-blocks downstream dependencies)
 export PI_TEAMS_HOOKS_FAILURE_ACTION=reopen
 
 # both reopen and create a follow-up task
 export PI_TEAMS_HOOKS_FAILURE_ACTION=reopen_followup
+
+# safety cap for auto-reopen loops (0 = disable auto-reopen)
+export PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK=3
+
+# owner for auto-created follow-up tasks
+# member (default), lead, or none
+export PI_TEAMS_HOOKS_FOLLOWUP_OWNER=member
 ```
+
+Agent-first intent:
+
+- Hook failures are remediated by agents (reopen/follow-up/assignment + teammate notification).
+- The user should not need to manually clear task gate state.
 
 Legacy shortcut still supported:
 

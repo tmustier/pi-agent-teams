@@ -53,7 +53,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Plan approval | Comrade can be “plan required” and needs lead approval to implement | ✅ | `/team spawn <name> plan` → read-only tools; sends `plan_approval_request`; `/team plan approve|reject`. | P1 |
 | Shutdown handshake | Lead requests shutdown; comrade can approve/reject | ✅ | Protocol: `shutdown_request` → `shutdown_approved` / `shutdown_rejected`. `/team shutdown <name>` (graceful), `/team kill <name>` (SIGTERM). Wording is style-controlled (e.g. “was asked to shut down”, “walked the plank”). | P1 |
 | Cleanup team | “Clean up the team” removes shared resources after comrades stopped | ✅ | `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks. | P1 |
-| Hooks / quality gates | `ComradeIdle`, `TaskCompleted` hooks | 🟡 | Optional leader-side hook runner (idle/task-complete/task-fail) via `PI_TEAMS_HOOKS_ENABLED=1` + scripts under `_hooks/`; inline failure surfacing + failure-action policies (`warn`/`followup`/`reopen`/`reopen_followup`) implemented. Standardized hook contract UX still evolving. | P2 |
+| Hooks / quality gates | `ComradeIdle`, `TaskCompleted` hooks | 🟡 | Optional leader-side hook runner (idle/task-complete/task-fail) via `PI_TEAMS_HOOKS_ENABLED=1` + scripts under `_hooks/`; inline failure surfacing + failure-action policies (`warn`/`followup`/`reopen`/`reopen_followup`) implemented; stable hook context payload exposed via `PI_TEAMS_HOOK_CONTEXT_JSON` + auto-remediation flow (reopen cap / follow-up owner policy / teammate notification). | P2 |
 | Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` + `/team task show` + `/team task clear`; panel supports fast `t`/`shift+t` toggle into task-centric view (`Ctrl+T` is reserved by Pi for thinking blocks). | P0 |
 | Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | ✅ | Worker env: `PI_TEAMS_TASK_LIST_ID` (manual workers). Leader: `/team task use <taskListId>` (persisted). Newly spawned workers inherit; existing workers need restart. | P1 |
 | Join/attach flow | Join existing team context from another running session | 🟡 | `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach` plus claim heartbeat/takeover handshake added. Widget/panel now show attached-mode banner + detach hint. | P2 |
@@ -106,7 +106,9 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
    - Implemented: optional leader-side hook runner (opt-in + timeout + logs).
    - Implemented: inline failure surfacing (task metadata + widget warning + task-panel/task-show quality-gate details).
    - Implemented: hook-failure policy controls via `PI_TEAMS_HOOKS_FAILURE_ACTION` (`warn`, `followup`, `reopen`, `reopen_followup`).
-   - Still missing: broader standardized hook contract and richer interactive remediation UX.
+   - Implemented: standardized hook context contract (`PI_TEAMS_HOOK_CONTEXT_VERSION=1`, `PI_TEAMS_HOOK_CONTEXT_JSON`).
+   - Implemented: autonomous remediation helpers (auto-reopen cap, follow-up owner policy, teammate remediation notification).
+   - Still missing: richer first-class remediation command UX + broader contract versioning story.
 
 11) **Better comrade interaction UX (within Pi constraints)** 🟡 (partial)
    - Implemented: panel overview shows selected teammate context (active/last completed task + last transcript event).

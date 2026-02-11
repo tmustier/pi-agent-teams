@@ -20,6 +20,9 @@ import { pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
 import {
 	getHookBaseName,
 	getTeamsHookFailureAction,
+	getTeamsHookFollowupOwnerPolicy,
+	getTeamsHookMaxReopensPerTask,
+	resolveTeamsHookFollowupOwner,
 	runTeamsHook,
 	shouldCreateHookFollowupTask,
 	shouldReopenTaskOnHookFailure,
@@ -234,7 +237,10 @@ export function runLeader(pi: ExtensionAPI): void {
 				const failureAction = getTeamsHookFailureAction(process.env);
 				const shouldFollowup = shouldCreateHookFollowupTask(failureAction);
 				const shouldReopen = shouldReopenTaskOnHookFailure(failureAction);
+				const maxReopens = getTeamsHookMaxReopensPerTask(process.env);
+				const followupOwnerPolicy = getTeamsHookFollowupOwnerPolicy(process.env);
 				const task = invocation.completedTask;
+				const leadName = teamConfig?.leadName ?? "team-lead";
 
 				const stderrFirstLine = res.stderr
 					.split(/\r?\n/)
@@ -256,6 +262,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				}
 
 				let taskReopened = false;
+				let taskReopenSuppressed = false;
 				if (task?.id) {
 					const nowIso = new Date().toISOString();
 					await updateTask(invocation.teamDir, invocation.taskListId, task.id, (cur) => {
@@ -271,6 +278,7 @@ export function runLeader(pi: ExtensionAPI): void {
 							metadata["qualityGateStatus"] = "passed";
 							metadata["qualityGateSummary"] = `passed in ${res.durationMs}ms`;
 							metadata["qualityGateLastSuccessAt"] = nowIso;
+							metadata["qualityGateReopenSuppressed"] = false;
 							return { ...cur, metadata };
 						}
 
@@ -280,10 +288,24 @@ export function runLeader(pi: ExtensionAPI): void {
 						metadata["qualityGateLastFailureAt"] = nowIso;
 
 						if (shouldReopen && cur.status === "completed") {
-							taskReopened = true;
-							metadata["reopenedByQualityGateAt"] = nowIso;
-							metadata["reopenedByQualityGateHook"] = hookName;
-							return { ...cur, status: "pending", metadata };
+							const prevReopenCountRaw = metadata["reopenedByQualityGateCount"];
+							const prevReopenCount =
+								typeof prevReopenCountRaw === "number" && Number.isFinite(prevReopenCountRaw) ? prevReopenCountRaw : 0;
+							const canAutoReopen = maxReopens > 0 && prevReopenCount < maxReopens;
+							if (canAutoReopen) {
+								taskReopened = true;
+								metadata["reopenedByQualityGateAt"] = nowIso;
+								metadata["reopenedByQualityGateHook"] = hookName;
+								metadata["reopenedByQualityGateCount"] = prevReopenCount + 1;
+								metadata["qualityGateReopenSuppressed"] = false;
+								return { ...cur, status: "pending", metadata };
+							}
+							taskReopenSuppressed = true;
+							metadata["qualityGateReopenSuppressed"] = true;
+							metadata["qualityGateReopenSuppressedReason"] =
+								maxReopens <= 0
+									? "PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK=0"
+									: `reopen limit reached (${maxReopens})`;
 						}
 						return { ...cur, metadata };
 					});
@@ -302,9 +324,17 @@ export function runLeader(pi: ExtensionAPI): void {
 				currentCtx.ui.notify(`Hook ${hookName} failed${failedTaskRef}: ${failureSummary}`, "warning");
 				if (taskReopened && task?.id) {
 					currentCtx.ui.notify(`Reopened task #${task.id} due to quality-gate failure`, "warning");
+				} else if (taskReopenSuppressed && shouldReopen && task?.id) {
+					currentCtx.ui.notify(`Auto-reopen suppressed for task #${task.id} (limit ${maxReopens})`, "warning");
 				}
 
+				let followupTask: TeamTask | null = null;
 				if (shouldFollowup && task?.id) {
+					const followupOwner = resolveTeamsHookFollowupOwner({
+						policy: followupOwnerPolicy,
+						memberName: invocation.memberName,
+						leadName,
+					});
 					const subject = `Quality gate failed: ${hookName} (task #${task.id})`;
 					const descParts: string[] = [];
 					descParts.push(`Hook: ${hookName}`);
@@ -325,12 +355,42 @@ export function runLeader(pi: ExtensionAPI): void {
 						descParts.push("");
 					}
 
-					await createTask(invocation.teamDir, invocation.taskListId, {
+					followupTask = await createTask(invocation.teamDir, invocation.taskListId, {
 						subject,
 						description: descParts.join("\n"),
+						owner: followupOwner,
 					});
+
+					if (followupOwner) {
+						await writeToMailbox(invocation.teamDir, invocation.taskListId, followupOwner, {
+							from: leadName,
+							text: JSON.stringify(taskAssignmentPayload(followupTask, leadName)),
+							timestamp: new Date().toISOString(),
+						});
+					}
+
 					await refreshTasks();
 					renderWidget();
+				}
+
+				const remediationTarget = sanitizeName(task?.owner ?? invocation.memberName ?? "");
+				if (remediationTarget) {
+					const nextSteps: string[] = [];
+					if (task?.id && taskReopened) nextSteps.push(`Task #${task.id} was reopened to pending.`);
+					if (followupTask?.id) nextSteps.push(`Follow-up task #${followupTask.id} was created.`);
+					if (nextSteps.length === 0 && task?.id) nextSteps.push(`Task #${task.id} still requires remediation.`);
+
+					const messageLines = [
+						`Quality gate failed (${hookName}${task?.id ? ` / task #${task.id}` : ""}): ${failureSummary}`,
+						...nextSteps,
+						"Please remediate automatically and continue without waiting for user intervention.",
+					];
+
+					await writeToMailbox(invocation.teamDir, invocation.taskListId, remediationTarget, {
+						from: leadName,
+						text: messageLines.join("\n"),
+						timestamp: new Date().toISOString(),
+					});
 				}
 			})
 			.catch((err: unknown) => {

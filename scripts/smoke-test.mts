@@ -34,6 +34,9 @@ import { sanitizeName } from "../extensions/teams/names.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	getTeamsHookFailureAction,
+	getTeamsHookFollowupOwnerPolicy,
+	getTeamsHookMaxReopensPerTask,
+	resolveTeamsHookFollowupOwner,
 	runTeamsHook,
 	shouldCreateHookFollowupTask,
 	shouldReopenTaskOnHookFailure,
@@ -485,7 +488,13 @@ console.log("\n9. teams-hooks (quality gates)");
 		path.join(hooksDir, "on_task_completed.js"),
 		"" +
 			"const fs = require('node:fs');\n" +
-			`fs.writeFileSync(${JSON.stringify(outFile)}, 'ok\\n', 'utf8');\n` +
+			"const payload = {\n" +
+			"  contextVersion: process.env.PI_TEAMS_HOOK_CONTEXT_VERSION || null,\n" +
+			"  contextJson: process.env.PI_TEAMS_HOOK_CONTEXT_JSON || null,\n" +
+			"  event: process.env.PI_TEAMS_HOOK_EVENT || null,\n" +
+			"  taskId: process.env.PI_TEAMS_TASK_ID || null,\n" +
+			"};\n" +
+			`fs.writeFileSync(${JSON.stringify(outFile)}, JSON.stringify(payload) + '\\n', 'utf8');\n` +
 			"process.exit(0);\n",
 		"utf8",
 	);
@@ -522,6 +531,25 @@ console.log("\n9. teams-hooks (quality gates)");
 	assert(res.ran === true, "runs on_task_completed hook");
 	assert(res.exitCode === 0, "hook exit code is 0");
 	assert(fs.existsSync(outFile), "hook wrote output file");
+	const hookOutRaw = fs.readFileSync(outFile, "utf8").trim();
+	const hookOut = JSON.parse(hookOutRaw) as {
+		contextVersion: string | null;
+		contextJson: string | null;
+		event: string | null;
+		taskId: string | null;
+	};
+	assertEq(hookOut.contextVersion, "1", "hook context version env is set");
+	assertEq(hookOut.event, "task_completed", "hook event env is set");
+	assertEq(hookOut.taskId, "1", "hook task id env is set");
+	const hookContext = JSON.parse(hookOut.contextJson ?? "{}") as {
+		version?: number;
+		event?: string;
+		task?: { id?: string; status?: string } | null;
+	};
+	assertEq(hookContext.version, 1, "hook context payload version is 1");
+	assertEq(hookContext.event, "task_completed", "hook context payload includes event");
+	assertEq(hookContext.task?.id, "1", "hook context payload includes task id");
+	assertEq(hookContext.task?.status, "completed", "hook context payload includes task status");
 
 	assertEq(getTeamsHookFailureAction({}), "warn", "hook failure action defaults to warn");
 	assertEq(
@@ -538,6 +566,13 @@ console.log("\n9. teams-hooks (quality gates)");
 	assert(shouldCreateHookFollowupTask("reopen_followup"), "reopen_followup action creates follow-up task");
 	assert(shouldReopenTaskOnHookFailure("reopen"), "reopen action reopens completed task");
 	assert(shouldReopenTaskOnHookFailure("reopen_followup"), "reopen_followup action reopens completed task");
+	assertEq(getTeamsHookFollowupOwnerPolicy({}), "member", "hook follow-up owner policy defaults to member");
+	assertEq(getTeamsHookFollowupOwnerPolicy({ PI_TEAMS_HOOKS_FOLLOWUP_OWNER: "lead" }), "lead", "hook follow-up owner policy reads env");
+	assertEq(resolveTeamsHookFollowupOwner({ policy: "member", memberName: "agent1", leadName: "team-lead" }), "agent1", "member policy resolves to member");
+	assertEq(resolveTeamsHookFollowupOwner({ policy: "member", leadName: "team-lead" }), "team-lead", "member policy falls back to lead");
+	assertEq(resolveTeamsHookFollowupOwner({ policy: "none", memberName: "agent1", leadName: "team-lead" }), undefined, "none policy clears follow-up owner");
+	assertEq(getTeamsHookMaxReopensPerTask({}), 3, "hook max reopens default is 3");
+	assertEq(getTeamsHookMaxReopensPerTask({ PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK: "0" }), 0, "hook max reopens supports zero");
 
 	// restore env
 	if (prevRoot === undefined) delete process.env.PI_TEAMS_ROOT_DIR;
@@ -633,6 +668,8 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("\"action\": \"member_kill\""), "README mentions teams tool member_kill action");
 		assert(readme.includes("\"action\": \"plan_approve\""), "README mentions teams tool plan_approve action");
 		assert(readme.includes("PI_TEAMS_HOOKS_FAILURE_ACTION"), "README mentions hook failure action policy");
+		assert(readme.includes("PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK"), "README mentions hook reopen cap policy");
+		assert(readme.includes("PI_TEAMS_HOOK_CONTEXT_JSON"), "README mentions hook context json contract");
 		assert(readme.includes("task-centric view"), "README mentions panel task-centric view");
 		assert(readme.includes("`t` or `shift+t`"), "README mentions panel task toggle key");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");

@@ -55,6 +55,7 @@ export function areTeamsHooksEnabled(env: NodeJS.ProcessEnv = process.env): bool
 }
 
 export type TeamsHookFailureAction = "warn" | "followup" | "reopen" | "reopen_followup";
+export type TeamsHookFollowupOwnerPolicy = "member" | "lead" | "none";
 
 function isTeamsHookFailureAction(value: string): value is TeamsHookFailureAction {
 	return value === "warn" || value === "followup" || value === "reopen" || value === "reopen_followup";
@@ -73,6 +74,76 @@ export function shouldCreateHookFollowupTask(action: TeamsHookFailureAction): bo
 
 export function shouldReopenTaskOnHookFailure(action: TeamsHookFailureAction): boolean {
 	return action === "reopen" || action === "reopen_followup";
+}
+
+function isHookFollowupOwnerPolicy(value: string): value is TeamsHookFollowupOwnerPolicy {
+	return value === "member" || value === "lead" || value === "none";
+}
+
+export function getTeamsHookFollowupOwnerPolicy(env: NodeJS.ProcessEnv = process.env): TeamsHookFollowupOwnerPolicy {
+	const raw = env.PI_TEAMS_HOOKS_FOLLOWUP_OWNER?.trim().toLowerCase();
+	if (raw && isHookFollowupOwnerPolicy(raw)) return raw;
+	return "member";
+}
+
+export function resolveTeamsHookFollowupOwner(opts: {
+	policy: TeamsHookFollowupOwnerPolicy;
+	memberName?: string;
+	leadName?: string;
+}): string | undefined {
+	if (opts.policy === "none") return undefined;
+	if (opts.policy === "lead") {
+		const lead = opts.leadName?.trim();
+		return lead ? lead : undefined;
+	}
+	const member = opts.memberName?.trim();
+	if (member) return member;
+	const lead = opts.leadName?.trim();
+	return lead ? lead : undefined;
+}
+
+export function getTeamsHookMaxReopensPerTask(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK?.trim();
+	if (!raw) return 3;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed < 0) return 3;
+	return parsed;
+}
+
+function truncateField(value: string, max: number): string {
+	if (value.length <= max) return value;
+	return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function getHookContextJson(invocation: TeamsHookInvocation): string {
+	const task = invocation.completedTask;
+	const payload = {
+		version: 1,
+		event: invocation.event,
+		team: {
+			id: invocation.teamId,
+			dir: invocation.teamDir,
+			taskListId: invocation.taskListId,
+			style: invocation.style,
+		},
+		member: invocation.memberName ?? null,
+		timestamp: invocation.timestamp ?? null,
+		task: task
+			? {
+				id: task.id,
+				subject: truncateField(task.subject, 1_000),
+				description: truncateField(task.description, 8_000),
+				owner: task.owner ?? null,
+				status: task.status,
+				blockedBy: task.blockedBy.slice(0, 200),
+				blocks: task.blocks.slice(0, 200),
+				metadata: task.metadata ?? {},
+				createdAt: task.createdAt,
+				updatedAt: task.updatedAt,
+			}
+			: null,
+	};
+	return JSON.stringify(payload);
 }
 
 export function getHookBaseName(event: TeamsHookEvent): string {
@@ -220,6 +291,8 @@ export async function runTeamsHook(opts: {
 	const baseEnv: NodeJS.ProcessEnv = {
 		...env,
 		PI_TEAMS_HOOK_EVENT: opts.invocation.event,
+		PI_TEAMS_HOOK_CONTEXT_VERSION: "1",
+		PI_TEAMS_HOOK_CONTEXT_JSON: getHookContextJson(opts.invocation),
 		PI_TEAMS_TEAM_ID: opts.invocation.teamId,
 		PI_TEAMS_TEAM_DIR: opts.invocation.teamDir,
 		PI_TEAMS_TASK_LIST_ID: opts.invocation.taskListId,
