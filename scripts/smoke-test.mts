@@ -612,7 +612,7 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("\"action\": \"member_kill\""), "README mentions teams tool member_kill action");
 		assert(readme.includes("\"action\": \"plan_approve\""), "README mentions teams tool plan_approve action");
 		assert(readme.includes("task-centric view"), "README mentions panel task-centric view");
-		assert(readme.includes("`t` or `tab`"), "README mentions panel task toggle key");
+		assert(readme.includes("`t` or `shift+t`"), "README mentions panel task toggle key");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");
 		assert(readme.includes("`r` reassign"), "README mentions panel task reassignment");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
