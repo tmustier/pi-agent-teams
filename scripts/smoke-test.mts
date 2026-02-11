@@ -108,8 +108,13 @@ assertEq(sanitizeName("UPPER"), "UPPER", "case preserved");
 
 // ── 1b. model policy ────────────────────────────────────────────────
 console.log("\n1b. model-policy");
-assert(isDeprecatedTeammateModelId("claude-sonnet-4"), "marks sonnet-4 as deprecated");
-assert(!isDeprecatedTeammateModelId("claude-sonnet-4-5"), "does not block newer sonnet variants");
+assert(isDeprecatedTeammateModelId("claude-sonnet-4"), "marks sonnet-4 alias as deprecated");
+assert(
+	isDeprecatedTeammateModelId("anthropic.claude-sonnet-4-20250514-v1:0"),
+	"marks sonnet-4 dated/bedrock variants as deprecated",
+);
+assert(!isDeprecatedTeammateModelId("claude-sonnet-4-5"), "does not block sonnet-4-5");
+assert(!isDeprecatedTeammateModelId("claude-sonnet-4.5"), "does not block sonnet-4.5");
 assert(!isDeprecatedTeammateModelId("gpt-5.1-codex-mini"), "keeps current models allowed");
 
 // ── 2. fs-lock ───────────────────────────────────────────────────────

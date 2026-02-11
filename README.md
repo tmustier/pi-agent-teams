@@ -208,7 +208,7 @@ All management commands live under `/team`.
 
 Model inheritance note:
 
-- If the leader is running a deprecated model id (e.g. Sonnet 4 variants), teammates will **not** inherit that id by default.
+- If the leader is running a deprecated model id (e.g. Sonnet 4 non-4.5 variants), teammates will **not** inherit that id by default.
 - Explicit deprecated `--model` overrides are rejected.
 
 ### Panel shortcuts (`/tw` / `/team panel`)
