@@ -12,7 +12,7 @@ Core agent-teams primitives, matching Claude's design:
 - **Auto-claim** — idle teammates automatically pick up the next unassigned, unblocked task. No manual dispatching required (disable with `PI_TEAMS_DEFAULT_AUTO_CLAIM=0`).
 - **Direct messages and broadcast** — send a message to one teammate or all of them at once, via file-based mailboxes.
 - **Graceful lifecycle** — spawn, stop, shutdown (with handshake), or kill teammates. The leader tracks who's online, idle, or streaming.
-- **LLM-callable delegate tool** — the model can spawn teammates and create/assign tasks in a single tool call, no slash commands needed.
+- **LLM-callable teams tool** — the model can spawn teammates, delegate tasks, and mutate task assignment/status in tool calls (no slash commands needed).
 - **Team cleanup** — tear down all team artifacts (tasks, mailboxes, sessions, worktrees) when you're done.
 
 Additional Pi-specific capabilities:
@@ -130,6 +130,14 @@ Or let the model drive it with the delegate tool:
     { "text": "Refactor auth module" }
   ]
 }
+```
+
+Task mutation examples (agent-run, no user command needed):
+
+```json
+{ "action": "task_assign", "taskId": "12", "assignee": "alice" }
+{ "action": "task_unassign", "taskId": "12" }
+{ "action": "task_set_status", "taskId": "12", "status": "completed" }
 ```
 
 ## Commands

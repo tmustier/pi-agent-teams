@@ -29,13 +29,16 @@ Custom styles can be added via JSON files under `~/.pi/agent/teams/_styles/<styl
 
 ## Spawning teammates
 
-Use the **`teams` tool** (LLM-callable) for the common case of delegating work:
+Use the **`teams` tool** (LLM-callable) for delegation and task mutations:
 
 ```
 teams({ action: "delegate", tasks: [{ text: "Implement auth", assignee: "alice" }] })
+teams({ action: "task_assign", taskId: "12", assignee: "alice" })
+teams({ action: "task_unassign", taskId: "12" })
+teams({ action: "task_set_status", taskId: "12", status: "completed" })
 ```
 
-This spawns teammates as needed, creates tasks, and assigns them. Options: `contextMode` ("fresh" or "branch"), `workspaceMode` ("shared" or "worktree").
+This spawns teammates as needed, creates tasks, assigns them, and can mutate existing tasks without slash commands. Options: `contextMode` ("fresh" or "branch"), `workspaceMode` ("shared" or "worktree").
 
 For more control, use `/team spawn`:
 

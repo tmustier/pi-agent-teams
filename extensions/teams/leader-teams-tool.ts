@@ -8,15 +8,19 @@ import { getTeamDir } from "./paths.js";
 import { taskAssignmentPayload } from "./protocol.js";
 import { ensureTeamConfig } from "./team-config.js";
 import { getTeamsNamingRules, getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName } from "./teams-style.js";
-import { createTask } from "./task-store.js";
+import { createTask, updateTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 
 type TeamsToolDelegateTask = { text: string; assignee?: string };
 
-const TeamsActionSchema = StringEnum(["delegate"] as const, {
-	description: "Teams tool action. Currently only 'delegate' is supported.",
+const TeamsActionSchema = StringEnum(["delegate", "task_assign", "task_unassign", "task_set_status"] as const, {
+	description: "Teams tool action.",
 	default: "delegate",
+});
+
+const TeamsTaskStatusSchema = StringEnum(["pending", "in_progress", "completed"] as const, {
+	description: "Task status for action=task_set_status.",
 });
 
 const TeamsContextModeSchema = StringEnum(["fresh", "branch"] as const, {
@@ -42,6 +46,9 @@ const TeamsDelegateTaskSchema = Type.Object({
 const TeamsToolParamsSchema = Type.Object({
 	action: Type.Optional(TeamsActionSchema),
 	tasks: Type.Optional(Type.Array(TeamsDelegateTaskSchema, { description: "Tasks to delegate (action=delegate)." })),
+	taskId: Type.Optional(Type.String({ description: "Task id for task mutation actions." })),
+	assignee: Type.Optional(Type.String({ description: "Assignee name for action=task_assign." })),
+	status: Type.Optional(TeamsTaskStatusSchema),
 	teammates: Type.Optional(
 		Type.Array(Type.String(), {
 			description: "Explicit comrade names to use/spawn. If omitted, uses existing or auto-generates.",
@@ -84,6 +91,7 @@ export function registerTeamsTool(opts: {
 		label: "Teams",
 		description: [
 			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
+			"You can also mutate existing tasks (assign, unassign, set status) without user slash commands.",
 			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
 			"Optional overrides: model='<provider>/<modelId>' and thinking (off|minimal|low|medium|high|xhigh).",
@@ -93,6 +101,124 @@ export function registerTeamsTool(opts: {
 
 		async execute(_toolCallId, params: TeamsToolParamsType, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
 			const action = params.action ?? "delegate";
+			const teamId = getTeamId(ctx);
+			const teamDir = getTeamDir(teamId);
+			const taskListId = getTaskListId();
+			const effectiveTlId = taskListId ?? teamId;
+			const cfg = await ensureTeamConfig(teamDir, {
+				teamId,
+				taskListId: effectiveTlId,
+				leadName: "team-lead",
+				style: getTeamsStyleFromEnv(),
+			});
+			const style: TeamsStyle = cfg.style ?? getTeamsStyleFromEnv();
+
+			const refreshUi = async (): Promise<void> => {
+				await refreshTasks();
+				renderWidget();
+			};
+
+			if (action === "task_set_status") {
+				const taskId = params.taskId?.trim();
+				const status = params.status;
+				if (!taskId || !status) {
+					return {
+						content: [{ type: "text", text: "task_set_status requires taskId and status" }],
+						details: { action, taskId, status },
+					};
+				}
+
+				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
+					if (cur.status === status) return cur;
+					const metadata = { ...(cur.metadata ?? {}) };
+					if (status === "completed") metadata.completedAt = new Date().toISOString();
+					if (status !== "completed" && cur.status === "completed") metadata.reopenedAt = new Date().toISOString();
+					return { ...cur, status, metadata };
+				});
+				if (!updated) {
+					return {
+						content: [{ type: "text", text: `Task not found: ${taskId}` }],
+						details: { action, taskId, status },
+					};
+				}
+
+				await refreshUi();
+				return {
+					content: [{ type: "text", text: `Updated task #${updated.id}: status=${updated.status}` }],
+					details: { action, teamId, taskListId: effectiveTlId, taskId: updated.id, status: updated.status },
+				};
+			}
+
+			if (action === "task_unassign") {
+				const taskId = params.taskId?.trim();
+				if (!taskId) {
+					return {
+						content: [{ type: "text", text: "task_unassign requires taskId" }],
+						details: { action },
+					};
+				}
+
+				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
+					if (!cur.owner) return cur;
+					if (cur.status === "completed") return { ...cur, owner: undefined };
+					const metadata = { ...(cur.metadata ?? {}) };
+					metadata.unassignedAt = new Date().toISOString();
+					metadata.unassignedBy = cfg.leadName;
+					metadata.unassignedReason = "teams-tool";
+					return { ...cur, owner: undefined, status: "pending", metadata };
+				});
+				if (!updated) {
+					return {
+						content: [{ type: "text", text: `Task not found: ${taskId}` }],
+						details: { action, taskId },
+					};
+				}
+
+				await refreshUi();
+				return {
+					content: [{ type: "text", text: `Unassigned task #${updated.id}` }],
+					details: { action, teamId, taskListId: effectiveTlId, taskId: updated.id },
+				};
+			}
+
+			if (action === "task_assign") {
+				const taskId = params.taskId?.trim();
+				const assignee = sanitizeName(params.assignee ?? "");
+				if (!taskId || !assignee) {
+					return {
+						content: [{ type: "text", text: "task_assign requires taskId and assignee" }],
+						details: { action, taskId, assignee: params.assignee },
+					};
+				}
+
+				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
+					const metadata = { ...(cur.metadata ?? {}) };
+					metadata.reassignedAt = new Date().toISOString();
+					metadata.reassignedBy = cfg.leadName;
+					metadata.reassignedTo = assignee;
+					if (cur.status === "completed") return { ...cur, owner: assignee, metadata };
+					return { ...cur, owner: assignee, status: "pending", metadata };
+				});
+				if (!updated) {
+					return {
+						content: [{ type: "text", text: `Task not found: ${taskId}` }],
+						details: { action, taskId, assignee },
+					};
+				}
+
+				await writeToMailbox(teamDir, effectiveTlId, assignee, {
+					from: cfg.leadName,
+					text: JSON.stringify(taskAssignmentPayload(updated, cfg.leadName)),
+					timestamp: new Date().toISOString(),
+				});
+
+				await refreshUi();
+				return {
+					content: [{ type: "text", text: `Assigned task #${updated.id} to ${formatMemberDisplayName(style, assignee)}` }],
+					details: { action, teamId, taskListId: effectiveTlId, taskId: updated.id, assignee },
+				};
+			}
+
 			if (action !== "delegate") {
 				return {
 					content: [{ type: "text", text: `Unsupported action: ${String(action)}` }],
@@ -113,17 +239,6 @@ export function registerTeamsTool(opts: {
 			const modelOverride = params.model?.trim();
 			const spawnModel = modelOverride && modelOverride.length > 0 ? modelOverride : undefined;
 			const spawnThinking = params.thinking;
-
-			const teamId = getTeamId(ctx);
-			const teamDir = getTeamDir(teamId);
-			const taskListId = getTaskListId();
-			const cfg = await ensureTeamConfig(teamDir, {
-				teamId,
-				taskListId: taskListId ?? teamId,
-				leadName: "team-lead",
-				style: getTeamsStyleFromEnv(),
-			});
-			const style: TeamsStyle = cfg.style ?? getTeamsStyleFromEnv();
 
 			let teammateNames: string[] = [];
 			const explicit = params.teammates;
@@ -172,7 +287,6 @@ export function registerTeamsTool(opts: {
 				warnings.push(...res.warnings);
 			}
 
-			// Assign tasks (explicit assignee wins; otherwise round-robin)
 			const assignments: Array<{ taskId: string; assignee: string; subject: string }> = [];
 			let rr = 0;
 			for (const t of inputTasks) {
@@ -191,7 +305,6 @@ export function registerTeamsTool(opts: {
 					continue;
 				}
 
-				// Ensure assignee exists
 				if (!teammates.has(assignee)) {
 					const res = await spawnTeammate(ctx, {
 						name: assignee,
@@ -212,7 +325,6 @@ export function registerTeamsTool(opts: {
 				const description = text;
 				const firstLine = description.split("\n").at(0) ?? "";
 				const subject = firstLine.slice(0, 120);
-				const effectiveTlId = taskListId ?? teamId;
 				const task = await createTask(teamDir, effectiveTlId, { subject, description, owner: assignee });
 
 				await writeToMailbox(teamDir, effectiveTlId, assignee, {
@@ -224,7 +336,6 @@ export function registerTeamsTool(opts: {
 				assignments.push({ taskId: task.id, assignee, subject });
 			}
 
-			// Best-effort widget refresh
 			void refreshTasks().finally(renderWidget);
 
 			const lines: string[] = [];
@@ -245,6 +356,7 @@ export function registerTeamsTool(opts: {
 				details: {
 					action,
 					teamId,
+					taskListId: effectiveTlId,
 					contextMode,
 					workspaceMode: requestedWorkspaceMode,
 					model: spawnModel,
