@@ -132,23 +132,35 @@ Or let the model drive it with the delegate tool:
 }
 ```
 
-Task/messaging mutation examples (agent-run, no user command needed):
+### Teams tool action reference (agent-run)
+
+| Action | Required fields | Purpose |
+| --- | --- | --- |
+| `delegate` | `tasks` | Spawn teammates as needed and create/assign tasks. |
+| `task_assign` | `taskId`, `assignee` | Assign/reassign a task owner. |
+| `task_unassign` | `taskId` | Clear owner (resets to pending for non-completed tasks). |
+| `task_set_status` | `taskId`, `status` | Set status to `pending`, `in_progress`, or `completed`. |
+| `task_dep_add` | `taskId`, `depId` | Add dependency edge (`taskId` depends on `depId`). |
+| `task_dep_rm` | `taskId`, `depId` | Remove dependency edge. |
+| `task_dep_ls` | `taskId` | Inspect dependency/block graph for one task. |
+| `message_dm` | `name`, `message` | Send mailbox DM to one teammate. |
+| `message_broadcast` | `message` | Send mailbox message to all discovered workers. |
+| `message_steer` | `name`, `message` | Send steer instruction to a running RPC teammate. |
+| `member_spawn` | `name` | Spawn one teammate (supports context/workspace/model/thinking/plan options). |
+| `member_shutdown` | `name` or `all=true` | Request graceful shutdown via mailbox handshake. |
+| `member_kill` | `name` | Force-stop one RPC teammate and unassign active tasks. |
+| `member_prune` | _(none)_ | Mark stale non-RPC workers offline (`all=true` to force). |
+| `plan_approve` | `name` | Approve pending plan for a plan-required teammate. |
+| `plan_reject` | `name` | Reject pending plan (`feedback` optional). |
+
+Example calls:
 
 ```json
 { "action": "task_assign", "taskId": "12", "assignee": "alice" }
-{ "action": "task_unassign", "taskId": "12" }
-{ "action": "task_set_status", "taskId": "12", "status": "completed" }
 { "action": "task_dep_add", "taskId": "12", "depId": "7" }
-{ "action": "task_dep_ls", "taskId": "12" }
-{ "action": "message_dm", "name": "alice", "message": "Please re-check the failing test" }
 { "action": "message_broadcast", "message": "Sync: finishing this milestone" }
-{ "action": "message_steer", "name": "alice", "message": "Change plan: prioritize bug #402" }
-{ "action": "member_spawn", "name": "alice", "contextMode": "branch", "workspaceMode": "worktree" }
-{ "action": "member_shutdown", "name": "alice", "reason": "checkpoint reached" }
 { "action": "member_kill", "name": "alice" }
-{ "action": "member_prune", "all": true }
 { "action": "plan_approve", "name": "alice" }
-{ "action": "plan_reject", "name": "alice", "feedback": "Include rollback strategy" }
 ```
 
 ## Commands

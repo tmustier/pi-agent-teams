@@ -29,27 +29,37 @@ Custom styles can be added via JSON files under `~/.pi/agent/teams/_styles/<styl
 
 ## Spawning teammates
 
-Use the **`teams` tool** (LLM-callable) for delegation and task mutations:
+Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations, lifecycle, and governance:
+
+| Action | Required fields | Notes |
+| --- | --- | --- |
+| `delegate` | `tasks` | Spawns as needed, creates and assigns tasks. |
+| `task_assign` | `taskId`, `assignee` | Assign/reassign owner. |
+| `task_unassign` | `taskId` | Clear owner. |
+| `task_set_status` | `taskId`, `status` | `pending` \| `in_progress` \| `completed`. |
+| `task_dep_add` / `task_dep_rm` | `taskId`, `depId` | Dependency graph edits. |
+| `task_dep_ls` | `taskId` | Dependency/block inspection. |
+| `message_dm` | `name`, `message` | Mailbox DM. |
+| `message_broadcast` | `message` | Mailbox broadcast. |
+| `message_steer` | `name`, `message` | RPC steer for running teammate. |
+| `member_spawn` | `name` | Supports context/workspace/model/thinking/plan options. |
+| `member_shutdown` | `name` or `all=true` | Graceful mailbox shutdown request. |
+| `member_kill` | `name` | Force-stop RPC teammate. |
+| `member_prune` | _(none)_ | Mark stale workers offline (`all=true` to force). |
+| `plan_approve` / `plan_reject` | `name` | Resolve pending plan approvals (`feedback` optional for reject). |
+
+Examples:
 
 ```
 teams({ action: "delegate", tasks: [{ text: "Implement auth", assignee: "alice" }] })
 teams({ action: "task_assign", taskId: "12", assignee: "alice" })
-teams({ action: "task_unassign", taskId: "12" })
-teams({ action: "task_set_status", taskId: "12", status: "completed" })
 teams({ action: "task_dep_add", taskId: "12", depId: "7" })
-teams({ action: "task_dep_ls", taskId: "12" })
-teams({ action: "message_dm", name: "alice", message: "Please re-check the failing test" })
 teams({ action: "message_broadcast", message: "Sync: finishing this milestone" })
-teams({ action: "message_steer", name: "alice", message: "Change plan: prioritize bug #402" })
-teams({ action: "member_spawn", name: "alice", contextMode: "branch", workspaceMode: "worktree" })
-teams({ action: "member_shutdown", name: "alice", reason: "checkpoint reached" })
 teams({ action: "member_kill", name: "alice" })
-teams({ action: "member_prune", all: true })
-teams({ action: "plan_approve", name: "alice" })
 teams({ action: "plan_reject", name: "alice", feedback: "Include rollback strategy" })
 ```
 
-This spawns teammates as needed, creates tasks, assigns them, mutates dependencies/status/ownership, sends team messages, handles teammate lifecycle actions, and can approve/reject plan-required workers without slash commands. Options: `contextMode` ("fresh" or "branch"), `workspaceMode` ("shared" or "worktree").
+This covers most day-to-day orchestration without slash commands. For nuanced/manual control, use `/team ...` commands directly.
 
 For more control, use `/team spawn`:
 
