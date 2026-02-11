@@ -30,6 +30,7 @@ export interface InteractiveWidgetDeps {
 	killMember(name: string): void;
 	setTaskStatus(taskId: string, status: TeamTask["status"]): Promise<boolean>;
 	unassignTask(taskId: string): Promise<boolean>;
+	assignTask(taskId: string, ownerName: string): Promise<boolean>;
 	suppressWidget(): void;
 	restoreWidget(): void;
 }
@@ -54,7 +55,7 @@ interface Row {
 	isChairman: boolean;
 }
 
-type WidgetMode = "overview" | "session" | "dm" | "tasks";
+type WidgetMode = "overview" | "session" | "dm" | "tasks" | "reassign";
 
 // ── Transcript formatting ──
 
@@ -175,6 +176,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 				let taskViewOwner: string | null = null;
 				let taskCursorIndex = 0;
 				let taskReturnMode: "overview" | "session" = "overview";
+				let reassignTaskId: string | null = null;
+				let reassignCursorIndex = 0;
 
 				const refreshInterval = setInterval(() => tui.requestRender(), 1000);
 
@@ -213,6 +216,26 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const clamped = Math.max(0, Math.min(taskCursorIndex, owned.length - 1));
 					taskCursorIndex = clamped;
 					return owned[clamped] ?? null;
+				}
+
+				function getReassignableMembers(): string[] {
+					return getVisibleWorkerNames({
+						teammates: deps.getTeammates(),
+						teamConfig: deps.getTeamConfig(),
+						tasks: deps.getTasks(),
+					});
+				}
+
+				function openReassign(taskId: string, currentOwner: string) {
+					const members = getReassignableMembers();
+					if (members.length === 0) {
+						showNotification(`No ${strings.memberTitle.toLowerCase()}s available`, "error");
+						return;
+					}
+					reassignTaskId = taskId;
+					reassignCursorIndex = Math.max(0, members.indexOf(currentOwner));
+					mode = "reassign";
+					tui.requestRender();
 				}
 
 				// ── Build row data (same logic as persistent widget) ──
@@ -640,7 +663,59 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					lines.push(truncateToWidth(` ${sep}`, width));
 					lines.push(
 						truncateToWidth(
-							theme.fg("dim", ` ↑↓/ws select · enter transcript · c complete · p pending · i in-progress · u unassign · m/d message · ${returnLabel}`),
+							theme.fg("dim", ` ↑↓/ws select · enter transcript · c complete · p pending · i in-progress · u unassign · r reassign · m/d message · ${returnLabel}`),
+							width,
+						),
+					);
+
+					return lines;
+				}
+
+				// ── Reassign render ──
+
+				function renderReassign(width: number): string[] {
+					if (!reassignTaskId) return renderTasks(width);
+					const members = getReassignableMembers();
+					const task = deps.getTasks().find((t) => t.id === reassignTaskId);
+
+					const lines: string[] = [];
+					const sep = theme.fg("dim", "─".repeat(Math.max(0, width - 2)));
+
+					if (!task) {
+						lines.push(truncateToWidth(` ${theme.fg("error", `Task #${reassignTaskId} not found`)}`, width));
+						lines.push(truncateToWidth(` ${sep}`, width));
+						lines.push(truncateToWidth(theme.fg("dim", " esc back"), width));
+						return lines;
+					}
+
+					lines.push(truncateToWidth(` ${theme.bold(theme.fg("accent", `Reassign #${task.id}`))}`, width));
+					lines.push(truncateToWidth(` ${theme.fg("dim", task.subject)}`, width));
+					const ownerLabel = task.owner ? formatMemberDisplayName(style, task.owner) : "(unassigned)";
+					lines.push(truncateToWidth(` ${theme.fg("muted", `current owner: ${ownerLabel}`)}`, width));
+
+					if (members.length === 0) {
+						lines.push(truncateToWidth(` ${theme.fg("error", `No ${strings.memberTitle.toLowerCase()}s available`)}`, width));
+						lines.push(truncateToWidth(` ${sep}`, width));
+						lines.push(truncateToWidth(theme.fg("dim", " esc back"), width));
+						return lines;
+					}
+
+					reassignCursorIndex = Math.max(0, Math.min(reassignCursorIndex, members.length - 1));
+					for (let i = 0; i < members.length; i++) {
+						const name = members[i];
+						if (!name) continue;
+						const selected = i === reassignCursorIndex;
+						const pointer = selected ? theme.fg("accent", "▸") : " ";
+						const display = formatMemberDisplayName(style, name);
+						const current = task.owner === name ? theme.fg("dim", " (current)") : "";
+						lines.push(truncateToWidth(`${pointer}${theme.bold(display)}${current}`, width));
+					}
+
+					if (notification) lines.push(truncateToWidth(` ${theme.fg(notification.color, notification.text)}`, width));
+					lines.push(truncateToWidth(` ${sep}`, width));
+					lines.push(
+						truncateToWidth(
+							theme.fg("dim", " ↑↓/ws select · 1-9 jump · enter assign · esc cancel"),
 							width,
 						),
 					);
@@ -685,6 +760,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 								return renderDm(width);
 							case "tasks":
 								return renderTasks(width);
+							case "reassign":
+								return renderReassign(width);
 						}
 					},
 
@@ -725,6 +802,69 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							return;
 						}
 
+						// ── Reassign mode ──
+						if (mode === "reassign") {
+							if (matchesKey(data, "escape")) {
+								mode = "tasks";
+								reassignTaskId = null;
+								tui.requestRender();
+								return;
+							}
+							const members = getReassignableMembers();
+							if (members.length === 0 || !reassignTaskId) {
+								mode = "tasks";
+								reassignTaskId = null;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "up") || data === "w") {
+								reassignCursorIndex = Math.max(0, reassignCursorIndex - 1);
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "down") || data === "s") {
+								reassignCursorIndex = Math.min(members.length - 1, reassignCursorIndex + 1);
+								tui.requestRender();
+								return;
+							}
+							if (/^[1-9]$/.test(data)) {
+								const jump = Number.parseInt(data, 10) - 1;
+								if (jump < members.length) {
+									reassignCursorIndex = jump;
+									tui.requestRender();
+								}
+								return;
+							}
+							if (matchesKey(data, "enter")) {
+								const taskId = reassignTaskId;
+								const targetName = members[reassignCursorIndex];
+								if (!taskId || !targetName) return;
+								const oldOwner = taskViewOwner;
+								mode = "tasks";
+								reassignTaskId = null;
+								void deps.assignTask(taskId, targetName)
+									.then((ok) => {
+										if (ok) {
+											taskViewOwner = targetName;
+											taskCursorIndex = 0;
+											showNotification(`Reassigned task #${taskId} to ${formatMemberDisplayName(style, targetName)}`);
+										} else {
+											taskViewOwner = oldOwner;
+											showNotification(`Failed to reassign task #${taskId}`, "error");
+										}
+										tui.requestRender();
+									})
+									.catch(() => {
+										taskViewOwner = oldOwner;
+										showNotification(`Failed to reassign task #${taskId}`, "error");
+										tui.requestRender();
+									});
+								tui.requestRender();
+								return;
+							}
+							return;
+						}
+
 						// ── Tasks mode ──
 						if (mode === "tasks") {
 							if (matchesKey(data, "escape") || data === "t") {
@@ -749,10 +889,15 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 								tui.requestRender();
 								return;
 							}
-							if (data === "c" || data === "p" || data === "i" || data === "u") {
+							if (data === "c" || data === "p" || data === "i" || data === "u" || data === "r") {
 								const selected = getSelectedOwnedTask(taskViewOwner);
 								if (!selected) {
 									showNotification("No task selected", "error");
+									return;
+								}
+
+								if (data === "r") {
+									openReassign(selected.id, taskViewOwner);
 									return;
 								}
 

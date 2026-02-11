@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@m
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
-import { TEAM_MAILBOX_NS } from "./protocol.js";
+import { TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
 import { createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
@@ -672,6 +672,29 @@ export function runLeader(pi: ExtensionAPI): void {
 					return { ...cur, owner: undefined, status: "pending", metadata };
 				});
 				if (!updated) return false;
+				await refreshTasks();
+				renderWidget();
+				return true;
+			},
+			async assignTask(taskId: string, ownerName: string) {
+				const owner = sanitizeName(ownerName);
+				if (!owner) return false;
+				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
+					const metadata = { ...(cur.metadata ?? {}) };
+					metadata.reassignedAt = new Date().toISOString();
+					metadata.reassignedBy = leadName;
+					metadata.reassignedTo = owner;
+					if (cur.status === "completed") return { ...cur, owner, metadata };
+					return { ...cur, owner, status: "pending", metadata };
+				});
+				if (!updated) return false;
+
+				await writeToMailbox(teamDir, effectiveTlId, owner, {
+					from: leadName,
+					text: JSON.stringify(taskAssignmentPayload(updated, leadName)),
+					timestamp: new Date().toISOString(),
+				});
+
 				await refreshTasks();
 				renderWidget();
 				return true;

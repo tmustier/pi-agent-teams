@@ -110,7 +110,8 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
    - Implemented: faster keyboard controls (`w/s`, `1-9`, `m/d`).
    - Implemented: task-centric panel mode (`t`) with owned-task drilldown, dependency/block visibility, and quick jump back to transcript.
    - Implemented: in-panel task mutations for selected task (`c` complete, `p` pending, `i` in-progress, `u` unassign).
-   - Next: optional tmux split-pane integration and richer assignment/reassignment flows in panel.
+   - Implemented: in-panel reassignment flow (`r`) with teammate picker.
+   - Next: optional tmux split-pane integration and deeper dependency/task editing flows in panel.
 
 12) **Join/attach flow** 🟡 (partial)
    - Implemented: `/team attach list`, `/team attach <teamId>`, `/team detach`.
