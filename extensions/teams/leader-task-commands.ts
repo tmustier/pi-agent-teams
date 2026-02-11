@@ -200,6 +200,19 @@ export async function handleTeamTaskCommand(opts: {
 				lines.push(result);
 			}
 
+			const qualityGateStatusRaw = task.metadata?.["qualityGateStatus"];
+			const qualityGateStatus =
+				qualityGateStatusRaw === "failed" || qualityGateStatusRaw === "passed" ? qualityGateStatusRaw : null;
+			const qualityGateSummaryRaw = task.metadata?.["qualityGateSummary"];
+			const qualityGateSummary =
+				typeof qualityGateSummaryRaw === "string" && qualityGateSummaryRaw.trim().length > 0
+					? qualityGateSummaryRaw.trim()
+					: null;
+			if (qualityGateStatus) {
+				lines.push("");
+				lines.push(`quality gate: ${qualityGateStatus}${qualityGateSummary ? ` • ${qualityGateSummary}` : ""}`);
+			}
+
 			ctx.ui.notify(lines.join("\n"), "info");
 			return;
 		}

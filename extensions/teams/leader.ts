@@ -17,7 +17,14 @@ import { openInteractiveWidget } from "./teams-panel.js";
 import { createTeamsWidget } from "./teams-widget.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import { pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
-import { getHookBaseName, runTeamsHook, type TeamsHookInvocation } from "./hooks.js";
+import {
+	getHookBaseName,
+	getTeamsHookFailureAction,
+	runTeamsHook,
+	shouldCreateHookFollowupTask,
+	shouldReopenTaskOnHookFailure,
+	type TeamsHookInvocation,
+} from "./hooks.js";
 import { handleTeamCommand } from "./leader-team-command.js";
 import { registerTeamsTool } from "./leader-teams-tool.js";
 import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode } from "./spawn-types.js";
@@ -224,36 +231,85 @@ export function runLeader(pi: ExtensionAPI): void {
 
 				const ok = res.exitCode === 0 && !res.timedOut && !res.error;
 				const hookName = getHookBaseName(invocation.event);
+				const failureAction = getTeamsHookFailureAction(process.env);
+				const shouldFollowup = shouldCreateHookFollowupTask(failureAction);
+				const shouldReopen = shouldReopenTaskOnHookFailure(failureAction);
+				const task = invocation.completedTask;
+
+				const stderrFirstLine = res.stderr
+					.split(/\r?\n/)
+					.map((line) => line.trim())
+					.find((line) => line.length > 0);
+				const failureParts: string[] = [];
+				if (res.error) failureParts.push(res.error);
+				if (res.timedOut) failureParts.push(`timeout after ${res.durationMs}ms`);
+				if (!res.timedOut && res.exitCode !== null && res.exitCode !== 0) failureParts.push(`exit code ${res.exitCode}`);
+				if (stderrFirstLine) failureParts.push(stderrFirstLine.length > 180 ? `${stderrFirstLine.slice(0, 179)}…` : stderrFirstLine);
+				const failureSummary = failureParts.join(" • ") || "hook failed";
 
 				// Idle hooks are intentionally quiet unless they fail.
 				if (invocation.event === "idle") {
 					if (!ok) {
-						currentCtx.ui.notify(
-							`Hook ${hookName} failed${res.timedOut ? " (timeout)" : ""}${res.exitCode !== null ? ` (code ${res.exitCode})` : ""}`,
-							"warning",
-						);
+						currentCtx.ui.notify(`Hook ${hookName} failed: ${failureSummary}`, "warning");
 					}
 					return;
 				}
 
-				// Task-completion hooks are visible.
+				let taskReopened = false;
+				if (task?.id) {
+					const nowIso = new Date().toISOString();
+					await updateTask(invocation.teamDir, invocation.taskListId, task.id, (cur) => {
+						const metadata = { ...(cur.metadata ?? {}) };
+						const prevFailureCountRaw = metadata["qualityGateFailureCount"];
+						const prevFailureCount =
+							typeof prevFailureCountRaw === "number" && Number.isFinite(prevFailureCountRaw) ? prevFailureCountRaw : 0;
+
+						metadata["qualityGateHook"] = hookName;
+						metadata["qualityGateAt"] = nowIso;
+
+						if (ok) {
+							metadata["qualityGateStatus"] = "passed";
+							metadata["qualityGateSummary"] = `passed in ${res.durationMs}ms`;
+							metadata["qualityGateLastSuccessAt"] = nowIso;
+							return { ...cur, metadata };
+						}
+
+						metadata["qualityGateStatus"] = "failed";
+						metadata["qualityGateSummary"] = failureSummary;
+						metadata["qualityGateFailureCount"] = prevFailureCount + 1;
+						metadata["qualityGateLastFailureAt"] = nowIso;
+
+						if (shouldReopen && cur.status === "completed") {
+							taskReopened = true;
+							metadata["reopenedByQualityGateAt"] = nowIso;
+							metadata["reopenedByQualityGateHook"] = hookName;
+							return { ...cur, status: "pending", metadata };
+						}
+						return { ...cur, metadata };
+					});
+
+					await refreshTasks();
+					renderWidget();
+				}
+
 				if (ok) {
-					currentCtx.ui.notify(`Hook ${hookName} passed (${res.durationMs}ms)`, "info");
+					const taskRef = task?.id ? ` for task #${task.id}` : "";
+					currentCtx.ui.notify(`Hook ${hookName} passed${taskRef} (${res.durationMs}ms)`, "info");
 					return;
 				}
 
-				currentCtx.ui.notify(
-					`Hook ${hookName} failed${res.timedOut ? " (timeout)" : ""}${res.exitCode !== null ? ` (code ${res.exitCode})` : ""}`,
-					"warning",
-				);
+				const failedTaskRef = task?.id ? ` for task #${task.id}` : "";
+				currentCtx.ui.notify(`Hook ${hookName} failed${failedTaskRef}: ${failureSummary}`, "warning");
+				if (taskReopened && task?.id) {
+					currentCtx.ui.notify(`Reopened task #${task.id} due to quality-gate failure`, "warning");
+				}
 
-				// Optional: on failure, create a follow-up task so it shows up in the shared list.
-				const createOnFail = process.env.PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE === "1";
-				const task = invocation.completedTask;
-				if (createOnFail && task?.id) {
+				if (shouldFollowup && task?.id) {
 					const subject = `Quality gate failed: ${hookName} (task #${task.id})`;
 					const descParts: string[] = [];
 					descParts.push(`Hook: ${hookName}`);
+					descParts.push(`Policy: ${failureAction}`);
+					descParts.push(`Failure: ${failureSummary}`);
 					if (res.command?.length) descParts.push(`Command: ${res.command.join(" ")}`);
 					descParts.push("");
 					if (task.subject) descParts.push(`Original task subject: ${task.subject}`);

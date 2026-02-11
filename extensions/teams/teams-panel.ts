@@ -98,6 +98,19 @@ function unresolvedDependencies(task: TeamTask, taskById: ReadonlyMap<string, Te
 	return unresolved;
 }
 
+function getQualityGateStatus(task: TeamTask): "failed" | "passed" | null {
+	const raw = task.metadata?.["qualityGateStatus"];
+	if (raw === "failed" || raw === "passed") return raw;
+	return null;
+}
+
+function getQualityGateSummary(task: TeamTask): string | null {
+	const raw = task.metadata?.["qualityGateSummary"];
+	if (typeof raw !== "string") return null;
+	const trimmed = raw.trim();
+	return trimmed.length > 0 ? trimmed : null;
+}
+
 function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: number): string[] {
 	const ts = formatTimestamp(entry.timestamp);
 	const tsStr = theme.fg("dim", ts);
@@ -647,8 +660,10 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						const selected = idx === taskCursorIndex;
 						const pointer = selected ? theme.fg("accent", "▸") : " ";
 						const subject = task.subject.length > 58 ? `${task.subject.slice(0, 57)}…` : task.subject;
+						const qgStatus = getQualityGateStatus(task);
 						const depTag = unresolved.length > 0 ? ` deps:${String(unresolved.length)}` : "";
-						const row = `${pointer}${theme.fg(statusColor, statusLabel.padEnd(11))} ${theme.fg("dim", `#${task.id}`)} ${subject}${theme.fg("dim", depTag)}`;
+						const qgTag = qgStatus === "failed" ? " qg:fail" : qgStatus === "passed" ? " qg:ok" : "";
+						const row = `${pointer}${theme.fg(statusColor, statusLabel.padEnd(11))} ${theme.fg("dim", `#${task.id}`)} ${subject}${theme.fg("dim", `${depTag}${qgTag}`)}`;
 						lines.push(truncateToWidth(row, width));
 					}
 
@@ -685,6 +700,13 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						);
 						lines.push(truncateToWidth(` ${theme.fg("dim", "blocking:")} ${theme.fg("muted", blockSummary)}`, width));
 						lines.push(truncateToWidth(` ${theme.fg("dim", "desc:")} ${theme.fg("muted", descPreview)}`, width));
+						const qgStatus = getQualityGateStatus(selectedTask);
+						if (qgStatus) {
+							const qgSummary = getQualityGateSummary(selectedTask);
+							const qgColor: ThemeColor = qgStatus === "failed" ? "error" : "success";
+							const qgText = qgSummary ? `${qgStatus} · ${qgSummary}` : qgStatus;
+							lines.push(truncateToWidth(` ${theme.fg("dim", "quality gate:")} ${theme.fg(qgColor, qgText)}`, width));
+						}
 					}
 
 					if (notification) lines.push(truncateToWidth(` ${theme.fg(notification.color, notification.text)}`, width));

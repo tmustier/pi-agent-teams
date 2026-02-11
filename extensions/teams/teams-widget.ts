@@ -45,6 +45,10 @@ function shortTeamId(teamId: string): string {
 	return teamId.length <= 12 ? teamId : `${teamId.slice(0, 8)}…`;
 }
 
+function hasQualityGateFailure(task: TeamTask): boolean {
+	return task.metadata?.["qualityGateStatus"] === "failed";
+}
+
 export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 	return (_tui: TUI, theme: Theme): Component => {
 		return {
@@ -83,6 +87,13 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						` attached: ${shortTeamId(activeTeamId)} (session ${shortTeamId(sessionTeamId)}) · /team detach`,
 					);
 					lines.push(truncateToWidth(attachLine, width));
+				}
+
+				const qgFailures = tasks.filter((task) => hasQualityGateFailure(task)).length;
+				if (qgFailures > 0) {
+					lines.push(
+						truncateToWidth(theme.fg("warning", ` quality gate failures: ${qgFailures} · /team task list`), width),
+					);
 				}
 
 				// ── Build row data ──

@@ -239,7 +239,8 @@ All management commands live under `/team`.
 | `PI_TEAMS_HOOKS_ENABLED` | Enable leader-side hooks/quality gates | `0` (off) |
 | `PI_TEAMS_HOOKS_DIR` | Hooks directory (absolute or relative to `PI_TEAMS_ROOT_DIR`) | `<teamsRoot>/_hooks` |
 | `PI_TEAMS_HOOK_TIMEOUT_MS` | Hook execution timeout (ms) | `60000` |
-| `PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE` | If `1`, create a follow-up task when a task hook fails | `0` (off) |
+| `PI_TEAMS_HOOKS_FAILURE_ACTION` | Hook-failure policy: `warn`, `followup`, `reopen`, `reopen_followup` | `warn` |
+| `PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE` | Legacy shortcut for `PI_TEAMS_HOOKS_FAILURE_ACTION=followup` | `0` (off) |
 
 ## Storage layout
 
@@ -286,7 +287,23 @@ Hooks run with working directory = the **leader session cwd** and receive contex
 - `PI_TEAMS_MEMBER`
 - `PI_TEAMS_TASK_ID`, `PI_TEAMS_TASK_SUBJECT`, `PI_TEAMS_TASK_OWNER`, `PI_TEAMS_TASK_STATUS`
 
-If you want hook failures to create a follow-up task automatically:
+Hook failure policy (for `task_completed` / `task_failed` hooks):
+
+```bash
+# default behavior: only notify + annotate task metadata
+export PI_TEAMS_HOOKS_FAILURE_ACTION=warn
+
+# create follow-up task (legacy-compatible behavior)
+export PI_TEAMS_HOOKS_FAILURE_ACTION=followup
+
+# reopen the completed task to pending (re-blocks downstream dependencies)
+export PI_TEAMS_HOOKS_FAILURE_ACTION=reopen
+
+# both reopen and create a follow-up task
+export PI_TEAMS_HOOKS_FAILURE_ACTION=reopen_followup
+```
+
+Legacy shortcut still supported:
 
 ```bash
 export PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE=1

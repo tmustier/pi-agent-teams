@@ -32,7 +32,12 @@ import {
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
-import { runTeamsHook } from "../extensions/teams/hooks.js";
+import {
+	getTeamsHookFailureAction,
+	runTeamsHook,
+	shouldCreateHookFollowupTask,
+	shouldReopenTaskOnHookFailure,
+} from "../extensions/teams/hooks.js";
 import { listDiscoveredTeams } from "../extensions/teams/team-discovery.js";
 import {
 	acquireTeamAttachClaim,
@@ -518,6 +523,22 @@ console.log("\n9. teams-hooks (quality gates)");
 	assert(res.exitCode === 0, "hook exit code is 0");
 	assert(fs.existsSync(outFile), "hook wrote output file");
 
+	assertEq(getTeamsHookFailureAction({}), "warn", "hook failure action defaults to warn");
+	assertEq(
+		getTeamsHookFailureAction({ PI_TEAMS_HOOKS_FAILURE_ACTION: "reopen_followup" }),
+		"reopen_followup",
+		"hook failure action reads explicit env",
+	);
+	assertEq(
+		getTeamsHookFailureAction({ PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE: "1" }),
+		"followup",
+		"legacy hook followup env maps to followup action",
+	);
+	assert(shouldCreateHookFollowupTask("followup"), "followup action creates follow-up task");
+	assert(shouldCreateHookFollowupTask("reopen_followup"), "reopen_followup action creates follow-up task");
+	assert(shouldReopenTaskOnHookFailure("reopen"), "reopen action reopens completed task");
+	assert(shouldReopenTaskOnHookFailure("reopen_followup"), "reopen_followup action reopens completed task");
+
 	// restore env
 	if (prevRoot === undefined) delete process.env.PI_TEAMS_ROOT_DIR;
 	else process.env.PI_TEAMS_ROOT_DIR = prevRoot;
@@ -611,6 +632,7 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("\"action\": \"message_broadcast\""), "README mentions teams tool message_broadcast action");
 		assert(readme.includes("\"action\": \"member_kill\""), "README mentions teams tool member_kill action");
 		assert(readme.includes("\"action\": \"plan_approve\""), "README mentions teams tool plan_approve action");
+		assert(readme.includes("PI_TEAMS_HOOKS_FAILURE_ACTION"), "README mentions hook failure action policy");
 		assert(readme.includes("task-centric view"), "README mentions panel task-centric view");
 		assert(readme.includes("`t` or `shift+t`"), "README mentions panel task toggle key");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");

@@ -54,6 +54,27 @@ export function areTeamsHooksEnabled(env: NodeJS.ProcessEnv = process.env): bool
 	return env.PI_TEAMS_HOOKS_ENABLED === "1";
 }
 
+export type TeamsHookFailureAction = "warn" | "followup" | "reopen" | "reopen_followup";
+
+function isTeamsHookFailureAction(value: string): value is TeamsHookFailureAction {
+	return value === "warn" || value === "followup" || value === "reopen" || value === "reopen_followup";
+}
+
+export function getTeamsHookFailureAction(env: NodeJS.ProcessEnv = process.env): TeamsHookFailureAction {
+	const raw = env.PI_TEAMS_HOOKS_FAILURE_ACTION?.trim().toLowerCase();
+	if (raw && isTeamsHookFailureAction(raw)) return raw;
+	if (env.PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE === "1") return "followup";
+	return "warn";
+}
+
+export function shouldCreateHookFollowupTask(action: TeamsHookFailureAction): boolean {
+	return action === "followup" || action === "reopen_followup";
+}
+
+export function shouldReopenTaskOnHookFailure(action: TeamsHookFailureAction): boolean {
+	return action === "reopen" || action === "reopen_followup";
+}
+
 export function getHookBaseName(event: TeamsHookEvent): string {
 	switch (event) {
 		case "idle":
