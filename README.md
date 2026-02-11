@@ -213,6 +213,7 @@ All management commands live under `/team`.
 - `a`: request abort
 - `k`: kill (SIGTERM)
 - `esc`: back/close panel
+- attached mode shows a banner (`attached: ...`) with `/team detach` hint
 
 ### Tasks
 

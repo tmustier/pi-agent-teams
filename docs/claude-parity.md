@@ -56,7 +56,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Hooks / quality gates | `ComradeIdle`, `TaskCompleted` hooks | 🟡 | Optional leader-side hook runner (idle/task-complete/task-fail) via `PI_TEAMS_HOOKS_ENABLED=1` + scripts under `_hooks/`. Still missing richer gating UX + standardized hook contract. | P2 |
 | Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` + `/team task show` + `/team task clear`. No Ctrl+T toggle yet. | P0 |
 | Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | ✅ | Worker env: `PI_TEAMS_TASK_LIST_ID` (manual workers). Leader: `/team task use <taskListId>` (persisted). Newly spawned workers inherit; existing workers need restart. | P1 |
-| Join/attach flow | Join existing team context from another running session | 🟡 | `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach` plus claim heartbeat/takeover handshake added. Still missing richer attached-mode affordances in panel. | P2 |
+| Join/attach flow | Join existing team context from another running session | 🟡 | `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach` plus claim heartbeat/takeover handshake added. Widget/panel now show attached-mode banner + detach hint. | P2 |
 
 ## Prioritized roadmap
 
@@ -121,7 +121,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 12) **Join/attach flow** 🟡 (partial)
    - Implemented: `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach`.
    - Implemented: explicit attach claim handshake with heartbeat + force takeover (`--claim`).
-   - Next: better panel affordances for attached mode.
+   - Implemented: attached-mode affordances in widget/panel (external team banner + `/team detach` hint).
 
 ## Where changes would land (code map)
 

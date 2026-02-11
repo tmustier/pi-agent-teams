@@ -24,6 +24,8 @@ export interface WidgetDeps {
 	getTeamConfig(): TeamConfig | null;
 	getStyle(): TeamsStyle;
 	isDelegateMode(): boolean;
+	getActiveTeamId(): string | null;
+	getSessionTeamId(): string | null;
 }
 
 export type WidgetFactory = (tui: TUI, theme: Theme) => Component;
@@ -37,6 +39,10 @@ interface WidgetRow {
 	completed: number;
 	tokensStr: string; // "—" for chairman
 	activityText: string;
+}
+
+function shortTeamId(teamId: string): string {
+	return teamId.length <= 12 ? teamId : `${teamId.slice(0, 8)}…`;
 }
 
 export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
@@ -68,6 +74,16 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 				let header = " " + theme.bold(theme.fg("accent", "Teams"));
 				if (delegateMode) header += " " + theme.fg("warning", "[delegate]");
 				lines.push(truncateToWidth(header, width));
+
+				const activeTeamId = deps.getActiveTeamId();
+				const sessionTeamId = deps.getSessionTeamId();
+				if (activeTeamId && sessionTeamId && activeTeamId !== sessionTeamId) {
+					const attachLine = theme.fg(
+						"warning",
+						` attached: ${shortTeamId(activeTeamId)} (session ${shortTeamId(sessionTeamId)}) · /team detach`,
+					);
+					lines.push(truncateToWidth(attachLine, width));
+				}
 
 				// ── Build row data ──
 				const cfgMembers = teamConfig?.members ?? [];

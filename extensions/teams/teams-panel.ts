@@ -31,6 +31,8 @@ export interface InteractiveWidgetDeps {
 	setTaskStatus(taskId: string, status: TeamTask["status"]): Promise<boolean>;
 	unassignTask(taskId: string): Promise<boolean>;
 	assignTask(taskId: string, ownerName: string): Promise<boolean>;
+	getActiveTeamId(): string | null;
+	getSessionTeamId(): string | null;
 	suppressWidget(): void;
 	restoreWidget(): void;
 }
@@ -38,6 +40,10 @@ export interface InteractiveWidgetDeps {
 function formatTimestamp(ts: number): string {
 	const d = new Date(ts);
 	return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function shortTeamId(teamId: string): string {
+	return teamId.length <= 12 ? teamId : `${teamId.slice(0, 8)}…`;
 }
 
 // ── Row data (mirrors teams-widget.ts) ──
@@ -181,6 +187,16 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 
 				const refreshInterval = setInterval(() => tui.requestRender(), 1000);
 
+				function renderAttachBanner(width: number): string | null {
+					const activeTeamId = deps.getActiveTeamId();
+					const sessionTeamId = deps.getSessionTeamId();
+					if (!activeTeamId || !sessionTeamId || activeTeamId === sessionTeamId) return null;
+					return truncateToWidth(
+						` ${theme.fg("warning", `attached: ${shortTeamId(activeTeamId)} (session ${shortTeamId(sessionTeamId)}) · /team detach`)}`,
+						width,
+					);
+				}
+
 				function showNotification(text: string, color: ThemeColor = "success") {
 					notification = { text, color };
 					if (notificationTimer) clearTimeout(notificationTimer);
@@ -312,6 +328,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					let header = " " + theme.bold(theme.fg("accent", "Teams"));
 					if (delegateMode) header += " " + theme.fg("warning", "[delegate]");
 					lines.push(truncateToWidth(header, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
 
 					if (rows.length === 0) {
 						lines.push(
@@ -461,6 +479,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("dim", `#${String(activeTask.id)} ${activeTask.subject}`)}`
 						: "";
 					lines.push(truncateToWidth(` ${icon} ${nameStr} \u2014 ${status} \u00b7 ${tokens}${taskLabel}`, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
 					lines.push(truncateToWidth(` ${sep}`, width));
 
 					// Format all transcript entries into rendered lines
@@ -489,9 +509,10 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					} else {
 						// Determine visible window size based on terminal height
 						const termHeight = process.stdout.rows || 24;
-						// Reserve: header(2) + scrollBar(1) + notification(0-1) + hintsSep(1) + hints(1)
+						// Reserve: header(2 + optional attach banner) + scrollBar(1) + notification(0-1) + hintsSep(1) + hints(1)
 						const notifLines = notification ? 1 : 0;
-						const chromeLines = 2 + 1 + notifLines + 1 + 1;
+						const attachLines = renderAttachBanner(width) ? 1 : 0;
+						const chromeLines = 2 + attachLines + 1 + notifLines + 1 + 1;
 						const viewportHeight = Math.max(3, termHeight - chromeLines);
 
 						// Apply scroll windowing only if content exceeds viewport
@@ -569,6 +590,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const returnLabel = taskReturnMode === "session" ? "esc back to transcript" : "esc back";
 
 					lines.push(truncateToWidth(` ${theme.bold(theme.fg("accent", `Tasks · ${ownerLabel}`))}`, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
 					lines.push(
 						truncateToWidth(
 							` ${theme.fg("dim", `${inProgressCount} in progress · ${pendingCount} pending · ${blockedCount} blocked · ${completedCount} done`)}`,
@@ -592,7 +615,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const termHeight = process.stdout.rows || 24;
 					const notifLines = notification ? 1 : 0;
 					const detailLines = 4;
-					const chromeLines = 2 + detailLines + notifLines + 1 + 1;
+					const attachLines = renderAttachBanner(width) ? 1 : 0;
+					const chromeLines = 2 + attachLines + detailLines + notifLines + 1 + 1;
 					const viewportHeight = Math.max(3, termHeight - chromeLines);
 
 					let start = 0;
@@ -689,6 +713,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					}
 
 					lines.push(truncateToWidth(` ${theme.bold(theme.fg("accent", `Reassign #${task.id}`))}`, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
 					lines.push(truncateToWidth(` ${theme.fg("dim", task.subject)}`, width));
 					const ownerLabel = task.owner ? formatMemberDisplayName(style, task.owner) : "(unassigned)";
 					lines.push(truncateToWidth(` ${theme.fg("muted", `current owner: ${ownerLabel}`)}`, width));
@@ -735,6 +761,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							width,
 						),
 					);
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
 					lines.push(truncateToWidth(` ${sep}`, width));
 					lines.push(
 						truncateToWidth(` ${theme.fg("accent", "\u25b8")} ${dmBuffer}\u2588`, width),

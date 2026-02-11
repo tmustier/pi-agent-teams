@@ -290,6 +290,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		getTeamConfig: () => teamConfig,
 		getStyle: () => style,
 		isDelegateMode: () => delegateMode,
+		getActiveTeamId: () => currentTeamId,
+		getSessionTeamId: () => currentCtx?.sessionManager.getSessionId() ?? null,
 	});
 
 	const refreshTasks = async () => {
@@ -734,6 +736,12 @@ export function runLeader(pi: ExtensionAPI): void {
 				await refreshTasks();
 				renderWidget();
 				return true;
+			},
+			getActiveTeamId() {
+				return currentTeamId;
+			},
+			getSessionTeamId() {
+				return ctx.sessionManager.getSessionId();
 			},
 			suppressWidget() {
 				widgetSuppressed = true;
