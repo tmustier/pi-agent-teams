@@ -601,6 +601,29 @@ export function runLeader(pi: ExtensionAPI): void {
 		return { ok: true, name, mode, workspaceMode, childCwd, note, warnings };
 	};
 
+	/** Accumulate DMs received between LLM turns so they can be delivered in a single message. */
+	let pendingLeaderDms: Array<{ from: string; text: string }> = [];
+	let leaderDmFlushScheduled = false;
+
+	const flushLeaderDms = () => {
+		if (!pendingLeaderDms.length) return;
+		const batch = pendingLeaderDms.splice(0);
+		leaderDmFlushScheduled = false;
+
+		const formatted = batch
+			.map((dm) => `**${dm.from}:**\n${dm.text}`)
+			.join("\n\n---\n\n");
+
+		pi.sendMessage(
+			{
+				customType: "teams-teammate-dm",
+				content: `You received message(s) from teammate(s):\n\n${formatted}`,
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	};
+
 	const pollLeaderInbox = async () => {
 		if (!currentCtx || !currentTeamId) return;
 		const teamDir = getTeamDir(currentTeamId);
@@ -614,6 +637,14 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 			pendingPlanApprovals,
 			enqueueHook,
+			onDm(from, text) {
+				pendingLeaderDms.push({ from, text });
+				if (!leaderDmFlushScheduled) {
+					leaderDmFlushScheduled = true;
+					// Batch DMs that arrive in the same poll cycle before flushing.
+					setTimeout(flushLeaderDms, 50);
+				}
+			},
 		});
 	};
 
