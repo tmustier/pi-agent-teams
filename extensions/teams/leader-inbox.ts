@@ -25,8 +25,9 @@ export async function pollLeaderInbox(opts: {
 	style: TeamsStyle;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 	enqueueHook?: (invocation: TeamsHookInvocation) => void;
+	onDm?: (from: string, text: string) => void;
 }): Promise<void> {
-	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook } = opts;
+	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook, onDm } = opts;
 	const strings = getTeamsStrings(style);
 
 	let msgs: Awaited<ReturnType<typeof popUnreadMessages>>;
@@ -209,6 +210,10 @@ export async function pollLeaderInbox(opts: {
 			continue;
 		}
 
-		ctx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
+		if (onDm) {
+			onDm(m.from, m.text);
+		} else {
+			ctx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
+		}
 	}
 }
