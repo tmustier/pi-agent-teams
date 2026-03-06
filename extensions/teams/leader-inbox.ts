@@ -10,53 +10,62 @@ import {
 	isShutdownRejected,
 } from "./protocol.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
-import { getTask, listTasks } from "./task-store.js";
+import { getTask } from "./task-store.js";
 
 import type { TeamsHookInvocation } from "./hooks.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 
 /**
- * Tracks task IDs from delegate calls so the leader can auto-notify
- * when all delegated tasks in a batch complete.
+ * Event-driven tracker for delegation batches.
  *
- * Each delegation batch is a Set of task IDs. When all IDs in a batch
- * reach "completed", the auto-notify fires. Per-task notifications
- * are handled separately (see `onTaskCompleted` callback).
+ * Tracks task IDs from delegate() calls. Tasks are only marked done
+ * when an idle_notification with completedTaskId is received — NOT
+ * by polling task file status. This avoids race conditions where
+ * listTasks() returns stale or premature data.
  */
 export class DelegationTracker {
-	private batches: Array<{ taskIds: Set<string>; notified: boolean }> = [];
+	private batches: Array<{
+		taskIds: Set<string>;
+		completedIds: Set<string>;
+		notified: boolean;
+	}> = [];
 
 	/** Register a new batch of delegated task IDs. */
 	addBatch(taskIds: string[]): void {
 		if (taskIds.length === 0) return;
-		this.batches.push({ taskIds: new Set(taskIds), notified: false });
+		this.batches.push({
+			taskIds: new Set(taskIds),
+			completedIds: new Set(),
+			notified: false,
+		});
 	}
 
-	/** Check all batches against current task statuses and return newly completed batches. */
-	async checkCompleted(teamDir: string, taskListId: string): Promise<Array<{ taskIds: string[] }>> {
-		if (this.batches.length === 0) return [];
+	/**
+	 * Mark a task as completed (called when idle_notification with
+	 * completedTaskId is received). Returns any batches that became
+	 * fully complete as a result.
+	 */
+	markCompleted(taskId: string): Array<{ taskIds: string[] }> {
+		const newlyComplete: Array<{ taskIds: string[] }> = [];
 
-		const allTasks = await listTasks(teamDir, taskListId);
-		const statusById = new Map<string, string>();
-		for (const t of allTasks) statusById.set(t.id, t.status);
-
-		const completed: Array<{ taskIds: string[] }> = [];
 		for (const batch of this.batches) {
 			if (batch.notified) continue;
-			const allDone = [...batch.taskIds].every((id) => {
-				const status = statusById.get(id);
-				return status === "completed";
-			});
+			if (!batch.taskIds.has(taskId)) continue;
+
+			batch.completedIds.add(taskId);
+
+			// Check if ALL tasks in this batch are now done
+			const allDone = [...batch.taskIds].every((id) => batch.completedIds.has(id));
 			if (allDone) {
 				batch.notified = true;
-				completed.push({ taskIds: [...batch.taskIds] });
+				newlyComplete.push({ taskIds: [...batch.taskIds] });
 			}
 		}
 
-		// Prune notified batches to avoid unbounded growth
+		// Prune notified batches
 		this.batches = this.batches.filter((b) => !b.notified);
-		return completed;
+		return newlyComplete;
 	}
 
 	/** Clear all tracked batches (e.g. on session switch). */
@@ -93,6 +102,10 @@ export async function pollLeaderInbox(opts: {
 		return;
 	}
 	if (!msgs.length) return;
+
+	// Collect batch completions across all messages in this poll cycle,
+	// then fire notifications once at the end (avoids duplicate triggers).
+	const batchCompletions: Array<{ taskIds: string[] }> = [];
 
 	for (const m of msgs) {
 		const approved = isShutdownApproved(m.text);
@@ -171,7 +184,7 @@ export async function pollLeaderInbox(opts: {
 				// ignore hook enqueue errors
 			}
 
-			// Hook: task completion / failure
+			// Hook + notifications for task completion / failure
 			if (idle.completedTaskId) {
 				const completedTask = await getTask(teamDir, taskListId, idle.completedTaskId);
 				try {
@@ -189,12 +202,21 @@ export async function pollLeaderInbox(opts: {
 					// ignore hook enqueue errors
 				}
 
-				// Per-task completion notification → inject into leader LLM context
-				if (idle.completedStatus !== "failed" && onTaskCompleted && completedTask) {
-					try {
-						onTaskCompleted(name, idle.completedTaskId, completedTask.subject ?? `task #${idle.completedTaskId}`);
-					} catch {
-						// ignore notification errors
+				if (idle.completedStatus !== "failed") {
+					// Per-task completion notification → inject into leader LLM context
+					if (onTaskCompleted && completedTask) {
+						try {
+							onTaskCompleted(name, idle.completedTaskId, completedTask.subject ?? `task #${idle.completedTaskId}`);
+						} catch {
+							// ignore notification errors
+						}
+					}
+
+					// Event-driven batch tracking: mark this task done and
+					// collect any batches that became fully complete.
+					if (delegationTracker) {
+						const completed = delegationTracker.markCompleted(idle.completedTaskId);
+						batchCompletions.push(...completed);
 					}
 				}
 			}
@@ -282,27 +304,20 @@ export async function pollLeaderInbox(opts: {
 		}
 	}
 
-	// Auto-notify leader when all tasks in a delegation batch are completed.
-	if (delegationTracker) {
-		try {
-			const completedBatches = await delegationTracker.checkCompleted(teamDir, taskListId);
-			for (const batch of completedBatches) {
-				const taskRefs = batch.taskIds.map((id) => `#${id}`).join(", ");
-				const summary = `All delegated tasks completed (${taskRefs}). Review the results and continue.`;
+	// Fire batch-complete notifications (deduplicated across this poll cycle).
+	for (const batch of batchCompletions) {
+		const taskRefs = batch.taskIds.map((id) => `#${id}`).join(", ");
+		const summary = `All delegated tasks completed (${taskRefs}). Review the results and continue.`;
 
-				try {
-					if (ctx.isIdle()) {
-						pi.sendUserMessage(`[team] ${summary}`);
-					} else {
-						pi.sendUserMessage(`[team] ${summary}`, { deliverAs: "followUp" });
-					}
-				} catch {
-					// Fallback: at minimum show a notification so user knows to check.
-					ctx.ui.notify(`✅ ${summary}`, "info");
-				}
+		try {
+			if (ctx.isIdle()) {
+				pi.sendUserMessage(`[team] ${summary}`);
+			} else {
+				pi.sendUserMessage(`[team] ${summary}`, { deliverAs: "followUp" });
 			}
 		} catch {
-			// Non-fatal: auto-notify is best-effort.
+			// Fallback: at minimum show a notification so user knows to check.
+			ctx.ui.notify(`✅ ${summary}`, "info");
 		}
 	}
 }
