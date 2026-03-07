@@ -9,6 +9,7 @@ import { getTeamDir, getTeamsRootDir, getTeamsStylesDir } from "./paths.js";
 import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { unassignTasksForAgent, type TeamTask } from "./task-store.js";
 import { setMemberStatus, setTeamStyle, type TeamConfig } from "./team-config.js";
+import { findGcCandidates, gcTeamDirs } from "./team-gc.js";
 import {
 	type TeamsStyle,
 	formatMemberDisplayName,
@@ -229,6 +230,88 @@ export async function handleTeamCleanupCommand(opts: {
 	ctx.ui.notify(`Cleaned up team directory: ${teamDir}`, "warning");
 	await refreshTasks();
 	renderWidget();
+}
+
+export async function handleTeamGcCommand(opts: {
+	ctx: ExtensionCommandContext;
+	rest: string[];
+	teamId: string;
+}): Promise<void> {
+	const { ctx, rest, teamId } = opts;
+
+	const flags = rest.filter((a) => a.startsWith("--"));
+	const argsOnly = rest.filter((a) => !a.startsWith("--"));
+	const force = flags.includes("--force");
+	const dryRun = flags.includes("--dry-run");
+
+	const unknownFlags = flags.filter((f) => f !== "--force" && f !== "--dry-run");
+	if (unknownFlags.length) {
+		ctx.ui.notify(`Unknown flag(s): ${unknownFlags.join(", ")}`, "error");
+		return;
+	}
+	if (argsOnly.length) {
+		ctx.ui.notify("Usage: /team gc [--dry-run] [--force]", "error");
+		return;
+	}
+
+	const excludeTeamIds = new Set([teamId]);
+	const { candidates, skipped } = await findGcCandidates({ excludeTeamIds });
+
+	if (candidates.length === 0) {
+		const msg = skipped.length > 0
+			? `No stale teams to clean up (${skipped.length} active team(s) skipped)`
+			: "No stale teams to clean up";
+		ctx.ui.notify(msg, "info");
+		return;
+	}
+
+	if (dryRun) {
+		const lines = [
+			`Would remove ${candidates.length} stale team(s):`,
+			"",
+			...candidates.map((c) => `  ${c.teamId} — ${c.reason}`),
+		];
+		if (skipped.length > 0) {
+			lines.push("", `Skipped ${skipped.length} active team(s):`);
+			for (const s of skipped) {
+				lines.push(`  ${s.teamId} — ${s.reason}`);
+			}
+		}
+		ctx.ui.notify(lines.join("\n"), "info");
+		return;
+	}
+
+	if (!force) {
+		if (process.stdout.isTTY && process.stdin.isTTY) {
+			const ok = await ctx.ui.confirm(
+				"Garbage collect stale teams",
+				[
+					`Remove ${candidates.length} stale team director${candidates.length === 1 ? "y" : "ies"}?`,
+					"",
+					...candidates.map((c) => `  ${c.teamId} — ${c.reason}`),
+				].join("\n"),
+			);
+			if (!ok) return;
+		} else {
+			ctx.ui.notify("Refusing to GC in non-interactive mode without --force", "error");
+			return;
+		}
+	}
+
+	const result = await gcTeamDirs(candidates);
+
+	const lines: string[] = [];
+	if (result.removed.length > 0) {
+		lines.push(`Removed ${result.removed.length} stale team(s)`);
+	}
+	if (result.errors.length > 0) {
+		lines.push(`Failed to remove ${result.errors.length} team(s):`);
+		for (const e of result.errors) {
+			lines.push(`  ${e.teamId}: ${e.error}`);
+		}
+	}
+
+	ctx.ui.notify(lines.join("\n"), result.errors.length > 0 ? "warning" : "info");
 }
 
 export async function handleTeamShutdownCommand(opts: {

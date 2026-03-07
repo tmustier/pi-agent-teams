@@ -17,7 +17,7 @@ import { openInteractiveWidget } from "./teams-panel.js";
 import { createTeamsWidget } from "./teams-widget.js";
 import { resolveTeammateModelSelection, formatProviderModel } from "./model-policy.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
-import { pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
+import { DelegationTracker, pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
 import {
 	getHookBaseName,
 	getTeamsHookFailureAction,
@@ -31,6 +31,9 @@ import {
 } from "./hooks.js";
 import { handleTeamCommand } from "./leader-team-command.js";
 import { registerTeamsTool } from "./leader-teams-tool.js";
+import { findGcCandidates, gcTeamDirs } from "./team-gc.js";
+import { cleanupTeamDir } from "./cleanup.js";
+import { getTeamsRootDir } from "./paths.js";
 import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode } from "./spawn-types.js";
 
 function getTeamsExtensionEntryPath(): string | null {
@@ -116,6 +119,7 @@ export function runLeader(pi: ExtensionAPI): void {
 	let tasks: TeamTask[] = [];
 	let teamConfig: TeamConfig | null = null;
 	const pendingPlanApprovals = new Map<string, { requestId: string; name: string; taskId?: string }>();
+	const delegationTracker = new DelegationTracker();
 	// Task list namespace. By default we keep it aligned with the current session id.
 	// (Do NOT read PI_TEAMS_TASK_LIST_ID for the leader; that env var is intended for workers
 	// and can easily be set globally, which makes the leader "lose" its tasks.)
@@ -601,12 +605,65 @@ export function runLeader(pi: ExtensionAPI): void {
 		return { ok: true, name, mode, workspaceMode, childCwd, note, warnings };
 	};
 
+	// ---- DM batching (PR #6 compat) ----
+	// Accumulate DMs received between LLM turns so they can be delivered in a single message.
+	const pendingLeaderDms: Array<{ from: string; text: string }> = [];
+	let leaderDmFlushScheduled = false;
+
+	const flushLeaderDms = () => {
+		if (!pendingLeaderDms.length) return;
+		const batch = pendingLeaderDms.splice(0);
+		leaderDmFlushScheduled = false;
+
+		const formatted = batch
+			.map((dm) => `**${dm.from}:**\n${dm.text}`)
+			.join("\n\n---\n\n");
+
+		pi.sendMessage(
+			{
+				customType: "teams-teammate-dm",
+				content: `You received message(s) from teammate(s):\n\n${formatted}`,
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	};
+
+	// ---- Per-task completion batching ----
+	// Accumulate task completion notifications and flush them together.
+	const pendingTaskCompletions: Array<{ memberName: string; taskId: string; taskSubject: string }> = [];
+	let taskCompletionFlushScheduled = false;
+
+	const flushTaskCompletions = () => {
+		if (!pendingTaskCompletions.length) return;
+		const batch = pendingTaskCompletions.splice(0);
+		taskCompletionFlushScheduled = false;
+
+		const formatted = batch
+			.map((tc) => `- **${tc.memberName}** completed task #${tc.taskId}: ${tc.taskSubject}`)
+			.join("\n");
+
+		try {
+			pi.sendMessage(
+				{
+					customType: "teams-task-completed",
+					content: `Teammate task completion(s):\n${formatted}`,
+					display: true,
+				},
+				{ triggerTurn: false, deliverAs: "followUp" },
+			);
+		} catch {
+			// ignore — batch-complete sendUserMessage will wake the leader anyway
+		}
+	};
+
 	const pollLeaderInbox = async () => {
 		if (!currentCtx || !currentTeamId) return;
 		const teamDir = getTeamDir(currentTeamId);
 		const effectiveTaskListId = taskListId ?? currentTeamId;
 		await pollLeaderInboxImpl({
 			ctx: currentCtx,
+			pi,
 			teamId: currentTeamId,
 			teamDir,
 			taskListId: effectiveTaskListId,
@@ -614,6 +671,23 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 			pendingPlanApprovals,
 			enqueueHook,
+			delegationTracker,
+			onDm(from, text) {
+				pendingLeaderDms.push({ from, text });
+				if (!leaderDmFlushScheduled) {
+					leaderDmFlushScheduled = true;
+					// Batch DMs that arrive in the same poll cycle before flushing.
+					setTimeout(flushLeaderDms, 50);
+				}
+			},
+			onTaskCompleted(memberName, taskId, taskSubject) {
+				pendingTaskCompletions.push({ memberName, taskId, taskSubject });
+				if (!taskCompletionFlushScheduled) {
+					taskCompletionFlushScheduled = true;
+					// Batch completions that arrive in the same poll cycle.
+					setTimeout(flushTaskCompletions, 50);
+				}
+			},
 		});
 	};
 
@@ -640,6 +714,16 @@ export function runLeader(pi: ExtensionAPI): void {
 			leadName: "team-lead",
 			style,
 		});
+
+		// Startup GC: silently remove stale team directories from previous sessions.
+		void findGcCandidates({ excludeTeamIds: new Set([currentTeamId]) })
+			.then((scan) => {
+				if (scan.candidates.length === 0) return;
+				return gcTeamDirs(scan.candidates);
+			})
+			.catch(() => {
+				// Startup GC is best-effort; never block the session.
+			});
 
 		await refreshTasks();
 		renderWidget();
@@ -677,6 +761,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is dissolved — leader moved on`);
 		}
 		stopLoops();
+		delegationTracker.clear();
 
 		currentCtx = ctx;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
@@ -727,6 +812,20 @@ export function runLeader(pi: ExtensionAPI): void {
 		stopLoops();
 		const strings = getTeamsStrings(style);
 		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
+
+		// Exit cleanup: delete own team directory if it's empty (no tasks, no teammates).
+		if (currentTeamId) {
+			try {
+				const teamDir = getTeamDir(currentTeamId);
+				const effectiveTlId = taskListId ?? currentTeamId;
+				const remainingTasks = await listTasks(teamDir, effectiveTlId);
+				if (remainingTasks.length === 0 && teammates.size === 0) {
+					await cleanupTeamDir(getTeamsRootDir(), teamDir);
+				}
+			} catch {
+				// Exit cleanup is best-effort; never block shutdown.
+			}
+		}
 	});
 
 	registerTeamsTool({
@@ -738,6 +837,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		refreshTasks,
 		renderWidget,
 		pendingPlanApprovals,
+		delegationTracker,
 	});
 
 	const openWidget = async (ctx: ExtensionCommandContext) => {

@@ -113,7 +113,12 @@ Or drive it manually:
 /team shutdown alice                       # graceful shutdown (handshake)
 /team shutdown                             # stop all teammates (leader session remains active)
 /team cleanup                              # remove team artifacts when done
+/team gc                                   # remove stale teams from past sessions
+/team gc --dry-run                         # preview what would be removed
 ```
+
+> **Automatic cleanup:** Stale team directories from previous sessions are automatically
+> garbage-collected on startup. Empty team directories are also cleaned up on session exit.
 
 Or let the model drive it with the delegate tool:
 
@@ -207,6 +212,7 @@ All management commands live under `/team`.
 | `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
 | `/team kill <name>` | Force-terminate |
 | `/team cleanup [--force]` | Delete team artifacts |
+| `/team gc [--dry-run] [--force]` | Remove stale team directories from all past sessions |
 | `/team id` | Print team/task-list IDs and paths |
 | `/team env <name>` | Print env vars to start a manual teammate |
 

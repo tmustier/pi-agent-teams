@@ -34,6 +34,7 @@ import {
 } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
+import type { DelegationTracker } from "./leader-inbox.js";
 
 type TeamsToolDelegateTask = { text: string; assignee?: string };
 
@@ -158,8 +159,9 @@ export function registerTeamsTool(opts: {
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
+	delegationTracker?: DelegationTracker;
 }): void {
-	const { pi, teammates, spawnTeammate, getTeamId, getTaskListId, refreshTasks, renderWidget, pendingPlanApprovals } = opts;
+	const { pi, teammates, spawnTeammate, getTeamId, getTaskListId, refreshTasks, renderWidget, pendingPlanApprovals, delegationTracker } = opts;
 
 	pi.registerTool({
 		name: "teams",
@@ -1038,6 +1040,11 @@ export function registerTeamsTool(opts: {
 				});
 
 				assignments.push({ taskId: task.id, assignee, subject });
+			}
+
+			// Track delegated task IDs for auto-notification when all complete
+			if (delegationTracker && assignments.length > 0) {
+				delegationTracker.addBatch(assignments.map((a) => a.taskId));
 			}
 
 			void refreshTasks().finally(renderWidget);

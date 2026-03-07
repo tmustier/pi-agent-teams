@@ -140,7 +140,10 @@ Spawning with `plan` restricts the teammate to read-only tools. After producing 
 /team prune [--all]            # hide stale manual teammates (mark offline in config)
 /team kill <name>              # force-terminate one RPC teammate
 /team cleanup [--force]        # delete team directory after all teammates stopped
+/team gc [--dry-run] [--force] # remove stale team directories from all past sessions
 ```
+
+Stale team directories from previous sessions are also automatically cleaned up on startup.
 
 Teammates reject shutdown requests when they have an active task. Use `/team kill <name>` to force.
 
