@@ -607,7 +607,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	// ---- DM batching (PR #6 compat) ----
 	// Accumulate DMs received between LLM turns so they can be delivered in a single message.
-	let pendingLeaderDms: Array<{ from: string; text: string }> = [];
+	const pendingLeaderDms: Array<{ from: string; text: string }> = [];
 	let leaderDmFlushScheduled = false;
 
 	const flushLeaderDms = () => {
@@ -631,7 +631,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	// ---- Per-task completion batching ----
 	// Accumulate task completion notifications and flush them together.
-	let pendingTaskCompletions: Array<{ memberName: string; taskId: string; taskSubject: string }> = [];
+	const pendingTaskCompletions: Array<{ memberName: string; taskId: string; taskSubject: string }> = [];
 	let taskCompletionFlushScheduled = false;
 
 	const flushTaskCompletions = () => {
