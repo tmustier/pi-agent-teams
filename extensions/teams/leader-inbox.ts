@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import {
@@ -16,8 +16,67 @@ import type { TeamsHookInvocation } from "./hooks.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 
+/**
+ * Event-driven tracker for delegation batches.
+ *
+ * Tracks task IDs from delegate() calls. Tasks are only marked done
+ * when an idle_notification with completedTaskId is received — NOT
+ * by polling task file status. This avoids race conditions where
+ * listTasks() returns stale or premature data.
+ */
+export class DelegationTracker {
+	private batches: Array<{
+		taskIds: Set<string>;
+		completedIds: Set<string>;
+		notified: boolean;
+	}> = [];
+
+	/** Register a new batch of delegated task IDs. */
+	addBatch(taskIds: string[]): void {
+		if (taskIds.length === 0) return;
+		this.batches.push({
+			taskIds: new Set(taskIds),
+			completedIds: new Set(),
+			notified: false,
+		});
+	}
+
+	/**
+	 * Mark a task as completed (called when idle_notification with
+	 * completedTaskId is received). Returns any batches that became
+	 * fully complete as a result.
+	 */
+	markCompleted(taskId: string): Array<{ taskIds: string[] }> {
+		const newlyComplete: Array<{ taskIds: string[] }> = [];
+
+		for (const batch of this.batches) {
+			if (batch.notified) continue;
+			if (!batch.taskIds.has(taskId)) continue;
+
+			batch.completedIds.add(taskId);
+
+			// Check if ALL tasks in this batch are now done
+			const allDone = [...batch.taskIds].every((id) => batch.completedIds.has(id));
+			if (allDone) {
+				batch.notified = true;
+				newlyComplete.push({ taskIds: [...batch.taskIds] });
+			}
+		}
+
+		// Prune notified batches
+		this.batches = this.batches.filter((b) => !b.notified);
+		return newlyComplete;
+	}
+
+	/** Clear all tracked batches (e.g. on session switch). */
+	clear(): void {
+		this.batches = [];
+	}
+}
+
 export async function pollLeaderInbox(opts: {
 	ctx: ExtensionContext;
+	pi: ExtensionAPI;
 	teamId: string;
 	teamDir: string;
 	taskListId: string;
@@ -25,8 +84,14 @@ export async function pollLeaderInbox(opts: {
 	style: TeamsStyle;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 	enqueueHook?: (invocation: TeamsHookInvocation) => void;
+	/** PR #6 compat: callback for teammate DMs routed to leader LLM context. */
+	onDm?: (from: string, text: string) => void;
+	/** Callback for per-task completion notifications routed to leader LLM context. */
+	onTaskCompleted?: (memberName: string, taskId: string, taskSubject: string) => void;
+	/** Batch delegation tracker for all-tasks-complete auto-notify. */
+	delegationTracker?: DelegationTracker;
 }): Promise<void> {
-	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook } = opts;
+	const { ctx, pi, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook, onDm, onTaskCompleted, delegationTracker } = opts;
 	const strings = getTeamsStrings(style);
 
 	let msgs: Awaited<ReturnType<typeof popUnreadMessages>>;
@@ -37,6 +102,10 @@ export async function pollLeaderInbox(opts: {
 		return;
 	}
 	if (!msgs.length) return;
+
+	// Collect batch completions across all messages in this poll cycle,
+	// then fire notifications once at the end (avoids duplicate triggers).
+	const batchCompletions: Array<{ taskIds: string[] }> = [];
 
 	for (const m of msgs) {
 		const approved = isShutdownApproved(m.text);
@@ -115,7 +184,7 @@ export async function pollLeaderInbox(opts: {
 				// ignore hook enqueue errors
 			}
 
-			// Hook: task completion / failure
+			// Hook + notifications for task completion / failure
 			if (idle.completedTaskId) {
 				const completedTask = await getTask(teamDir, taskListId, idle.completedTaskId);
 				try {
@@ -131,6 +200,24 @@ export async function pollLeaderInbox(opts: {
 					});
 				} catch {
 					// ignore hook enqueue errors
+				}
+
+				if (idle.completedStatus !== "failed") {
+					// Per-task completion notification → inject into leader LLM context
+					if (onTaskCompleted && completedTask) {
+						try {
+							onTaskCompleted(name, idle.completedTaskId, completedTask.subject ?? `task #${idle.completedTaskId}`);
+						} catch {
+							// ignore notification errors
+						}
+					}
+
+					// Event-driven batch tracking: mark this task done and
+					// collect any batches that became fully complete.
+					if (delegationTracker) {
+						const completed = delegationTracker.markCompleted(idle.completedTaskId);
+						batchCompletions.push(...completed);
+					}
 				}
 			}
 
@@ -209,6 +296,28 @@ export async function pollLeaderInbox(opts: {
 			continue;
 		}
 
-		ctx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
+		// Unrecognized message = teammate DM to leader
+		if (onDm) {
+			onDm(m.from, m.text);
+		} else {
+			ctx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
+		}
+	}
+
+	// Fire batch-complete notifications (deduplicated across this poll cycle).
+	for (const batch of batchCompletions) {
+		const taskRefs = batch.taskIds.map((id) => `#${id}`).join(", ");
+		const summary = `All delegated tasks completed (${taskRefs}). Review the results and continue.`;
+
+		try {
+			if (ctx.isIdle()) {
+				pi.sendUserMessage(`[team] ${summary}`);
+			} else {
+				pi.sendUserMessage(`[team] ${summary}`, { deliverAs: "followUp" });
+			}
+		} catch {
+			// Fallback: at minimum show a notification so user knows to check.
+			ctx.ui.notify(`✅ ${summary}`, "info");
+		}
 	}
 }
