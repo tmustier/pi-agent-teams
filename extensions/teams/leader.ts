@@ -31,6 +31,9 @@ import {
 } from "./hooks.js";
 import { handleTeamCommand } from "./leader-team-command.js";
 import { registerTeamsTool } from "./leader-teams-tool.js";
+import { findGcCandidates, gcTeamDirs } from "./team-gc.js";
+import { cleanupTeamDir } from "./cleanup.js";
+import { getTeamsRootDir } from "./paths.js";
 import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode } from "./spawn-types.js";
 
 function getTeamsExtensionEntryPath(): string | null {
@@ -641,6 +644,16 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 		});
 
+		// Startup GC: silently remove stale team directories from previous sessions.
+		void findGcCandidates({ excludeTeamIds: new Set([currentTeamId]) })
+			.then((scan) => {
+				if (scan.candidates.length === 0) return;
+				return gcTeamDirs(scan.candidates);
+			})
+			.catch(() => {
+				// Startup GC is best-effort; never block the session.
+			});
+
 		await refreshTasks();
 		renderWidget();
 
@@ -727,6 +740,20 @@ export function runLeader(pi: ExtensionAPI): void {
 		stopLoops();
 		const strings = getTeamsStrings(style);
 		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
+
+		// Exit cleanup: delete own team directory if it's empty (no tasks, no teammates).
+		if (currentTeamId) {
+			try {
+				const teamDir = getTeamDir(currentTeamId);
+				const effectiveTlId = taskListId ?? currentTeamId;
+				const remainingTasks = await listTasks(teamDir, effectiveTlId);
+				if (remainingTasks.length === 0 && teammates.size === 0) {
+					await cleanupTeamDir(getTeamsRootDir(), teamDir);
+				}
+			} catch {
+				// Exit cleanup is best-effort; never block shutdown.
+			}
+		}
 	});
 
 	registerTeamsTool({
