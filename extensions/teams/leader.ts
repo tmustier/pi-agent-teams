@@ -682,7 +682,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		stopLoops();
 
 		// Clean up worktrees from the old session before switching.
-		if (prevTeamId) {
+		// Only clean up teams this session owns — never attached teams.
+		const prevSessionId = currentCtx?.sessionManager.getSessionId();
+		if (prevTeamId && prevTeamId === prevSessionId) {
 			const teamDir = getTeamDir(prevTeamId);
 			try {
 				await cleanupWorktrees({ teamDir, teamId: prevTeamId, repoCwd: prevCwd });
@@ -742,7 +744,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
 
 		// Clean up worktrees + branches for this team session so they don't accumulate on disk.
-		if (currentTeamId) {
+		// Only clean up teams this session owns — never attached teams.
+		const sessionId = currentCtx.sessionManager.getSessionId();
+		if (currentTeamId && currentTeamId === sessionId) {
 			const teamDir = getTeamDir(currentTeamId);
 			try {
 				await cleanupWorktrees({ teamDir, teamId: currentTeamId, repoCwd: currentCtx.cwd });

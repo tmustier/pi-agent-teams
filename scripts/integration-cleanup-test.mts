@@ -181,26 +181,29 @@ console.log("\n4. cleanupTeamDir (full cleanup including worktrees)");
 // ── Test 5: gcStaleTeamDirs basic flow ───────────────────────────
 console.log("\n5. gcStaleTeamDirs (basic)");
 {
-	// Create 3 team dirs: old-idle, old-active (online member), recent-idle
+	// Create 3 team dirs: old-idle, old-active (online worker), recent-idle
 	const oldIdleDir = path.join(teamsRoot, "old-idle");
 	fs.mkdirSync(oldIdleDir, { recursive: true });
 	await ensureTeamConfig(oldIdleDir, { teamId: "old-idle", taskListId: "old-idle", leadName: "lead", style: "normal" });
 	// Backdate both the directory mtime AND the config.json createdAt.
-	// Also set the lead member to offline (simulates a finished session).
+	// NOTE: the lead member stays status: "online" (as ensureTeamConfig creates it).
+	// GC must ignore the lead's status — only workers count.
 	const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 	const oldIdleConfig = JSON.parse(fs.readFileSync(path.join(oldIdleDir, "config.json"), "utf8"));
 	oldIdleConfig.createdAt = twoDaysAgo.toISOString();
-	for (const m of oldIdleConfig.members ?? []) { m.status = "offline"; }
 	fs.writeFileSync(path.join(oldIdleDir, "config.json"), JSON.stringify(oldIdleConfig, null, 2));
 	fs.utimesSync(oldIdleDir, twoDaysAgo, twoDaysAgo);
 
 	const oldActiveDir = path.join(teamsRoot, "old-active");
 	fs.mkdirSync(oldActiveDir, { recursive: true });
 	await ensureTeamConfig(oldActiveDir, { teamId: "old-active", taskListId: "old-active", leadName: "lead", style: "normal" });
-	// Add an "online" member and backdate
+	// Add an online *worker* (role: "worker") and backdate — GC must keep this.
 	const configPath = path.join(oldActiveDir, "config.json");
 	const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-	config.members = [{ name: "worker1", role: "worker", status: "online" }];
+	config.members = [
+		{ name: "lead", role: "lead", status: "online" },
+		{ name: "worker1", role: "worker", status: "online" },
+	];
 	config.createdAt = twoDaysAgo.toISOString();
 	fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 	fs.utimesSync(oldActiveDir, twoDaysAgo, twoDaysAgo);
@@ -272,8 +275,89 @@ console.log("\n6. gcStaleTeamDirs (in-progress tasks)");
 	assert(result.skipped.some((s) => s.teamId === teamId && s.reason === "has active work"), "gc: skipped with reason");
 }
 
-// ── Test 7: gcStaleTeamDirs ignores _styles and _hooks dirs ──────
-console.log("\n7. gcStaleTeamDirs (ignores underscore dirs)");
+// ── Test 7: gcStaleTeamDirs ignores online lead member ───────────
+console.log("\n7. gcStaleTeamDirs (ignores online lead)");
+{
+	// ensureTeamConfig creates the lead as status: "online". GC must still
+	// remove the team when no *workers* are online, even if the lead is.
+	const teamId = "old-lead-only";
+	const teamDir = path.join(teamsRoot, teamId);
+	fs.mkdirSync(teamDir, { recursive: true });
+	await ensureTeamConfig(teamDir, { teamId, taskListId: teamId, leadName: "lead", style: "normal" });
+	// Backdate — do NOT change lead status to offline.
+	const twoDaysAgoLocal = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+	const cfg = JSON.parse(fs.readFileSync(path.join(teamDir, "config.json"), "utf8"));
+	cfg.createdAt = twoDaysAgoLocal.toISOString();
+	fs.writeFileSync(path.join(teamDir, "config.json"), JSON.stringify(cfg, null, 2));
+	fs.utimesSync(teamDir, twoDaysAgoLocal, twoDaysAgoLocal);
+
+	const result = await gcStaleTeamDirs({
+		teamsRootDir: teamsRoot,
+		maxAgeMs: 24 * 60 * 60 * 1000,
+		repoCwd: repoDir,
+		dryRun: false,
+	});
+
+	assert(result.removed.includes(teamId), "gc: team with only online lead is removed");
+	assert(!fs.existsSync(teamDir), "gc: old-lead-only dir deleted");
+}
+
+// ── Test 8: gcStaleTeamDirs respects live attach claims ──────────
+console.log("\n8. gcStaleTeamDirs (respects attach claims)");
+{
+	const teamId = "old-attached";
+	const teamDir = path.join(teamsRoot, teamId);
+	fs.mkdirSync(teamDir, { recursive: true });
+	await ensureTeamConfig(teamDir, { teamId, taskListId: teamId, leadName: "lead", style: "normal" });
+	// Backdate the team — would normally be GC'd.
+	const twoDaysAgoLocal = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+	const cfg = JSON.parse(fs.readFileSync(path.join(teamDir, "config.json"), "utf8"));
+	cfg.createdAt = twoDaysAgoLocal.toISOString();
+	fs.writeFileSync(path.join(teamDir, "config.json"), JSON.stringify(cfg, null, 2));
+	fs.utimesSync(teamDir, twoDaysAgoLocal, twoDaysAgoLocal);
+
+	// Write a fresh attach claim (heartbeat is recent).
+	const claimPath = path.join(teamDir, ".attach-claim.json");
+	fs.writeFileSync(claimPath, JSON.stringify({
+		holderSessionId: "other-session",
+		claimedAt: new Date().toISOString(),
+		heartbeatAt: new Date().toISOString(),
+		pid: process.pid,
+	}));
+
+	const result = await gcStaleTeamDirs({
+		teamsRootDir: teamsRoot,
+		maxAgeMs: 24 * 60 * 60 * 1000,
+		repoCwd: repoDir,
+		dryRun: false,
+	});
+
+	assert(!result.removed.includes(teamId), "gc: old-attached NOT removed (has live claim)");
+	assert(fs.existsSync(teamDir), "gc: old-attached dir still exists");
+	assert(result.skipped.some((s) => s.teamId === teamId && s.reason === "has active work"), "gc: skipped with reason");
+
+	// Now test with a stale claim — should be removed.
+	const staleClaim = {
+		holderSessionId: "dead-session",
+		claimedAt: twoDaysAgoLocal.toISOString(),
+		heartbeatAt: twoDaysAgoLocal.toISOString(),
+		pid: 99999,
+	};
+	fs.writeFileSync(claimPath, JSON.stringify(staleClaim));
+
+	const result2 = await gcStaleTeamDirs({
+		teamsRootDir: teamsRoot,
+		maxAgeMs: 24 * 60 * 60 * 1000,
+		repoCwd: repoDir,
+		dryRun: false,
+	});
+
+	assert(result2.removed.includes(teamId), "gc: old-attached removed (stale claim)");
+	assert(!fs.existsSync(teamDir), "gc: old-attached dir deleted after stale claim");
+}
+
+// ── Test 9: gcStaleTeamDirs ignores _styles and _hooks dirs ──────
+console.log("\n9. gcStaleTeamDirs (ignores underscore dirs)");
 {
 	const stylesDir = path.join(teamsRoot, "_styles");
 	const hooksDir = path.join(teamsRoot, "_hooks");
@@ -294,8 +378,8 @@ console.log("\n7. gcStaleTeamDirs (ignores underscore dirs)");
 	assert(!result.removed.includes("_hooks"), "gc: _hooks not targeted");
 }
 
-// ── Test 8: cleanupWorktrees handles missing repo gracefully ─────
-console.log("\n8. cleanupWorktrees (no repo context)");
+// ── Test 10: cleanupWorktrees handles missing repo gracefully ────
+console.log("\n10. cleanupWorktrees (no repo context)");
 {
 	const teamDir = path.join(teamsRoot, "no-repo");
 	const wtDir = path.join(teamDir, "worktrees");

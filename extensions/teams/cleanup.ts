@@ -136,7 +136,7 @@ export async function gcStaleTeamDirs(opts: {
 			continue;
 		}
 
-		// Check for active work: in_progress tasks or online members.
+		// Check for active work: in_progress tasks, online workers, or live attach claims.
 		let hasActiveWork = false;
 		try {
 			const configPath = path.join(teamDir, "config.json");
@@ -146,7 +146,11 @@ export async function gcStaleTeamDirs(opts: {
 				const members = (config as Record<string, unknown>).members;
 				if (Array.isArray(members)) {
 					for (const m of members) {
-						if (typeof m === "object" && m !== null && (m as Record<string, unknown>).status === "online") {
+						if (typeof m !== "object" || m === null) continue;
+						const rec = m as Record<string, unknown>;
+						// Ignore the lead — it stays "online" forever and is not a signal of activity.
+						if (rec.role === "lead") continue;
+						if (rec.status === "online") {
 							hasActiveWork = true;
 							break;
 						}
@@ -155,6 +159,28 @@ export async function gcStaleTeamDirs(opts: {
 			}
 		} catch {
 			// No config — probably safe to remove.
+		}
+
+		// Check for a live attach claim (another session is using this team).
+		if (!hasActiveWork) {
+			try {
+				const claimPath = path.join(teamDir, ".attach-claim.json");
+				const claimRaw = await fs.promises.readFile(claimPath, "utf8");
+				const claim: unknown = JSON.parse(claimRaw);
+				if (typeof claim === "object" && claim !== null) {
+					const heartbeatAt = (claim as Record<string, unknown>).heartbeatAt;
+					if (typeof heartbeatAt === "string") {
+						const hbTs = Date.parse(heartbeatAt);
+						// Consider claims fresh if heartbeat is within 5 minutes.
+						const claimFreshnessMs = 5 * 60 * 1000;
+						if (Number.isFinite(hbTs) && now - hbTs < claimFreshnessMs) {
+							hasActiveWork = true;
+						}
+					}
+				}
+			} catch {
+				// No claim file or invalid — not actively attached.
+			}
 		}
 
 		if (!hasActiveWork) {

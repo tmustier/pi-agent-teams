@@ -168,17 +168,17 @@ export async function cleanupWorktrees(opts: {
 		return { removedWorktrees, removedBranches, warnings };
 	}
 
-	// Find the repo root. Try repoCwd first, then any existing worktree path.
+	// Find the repo root. Prefer deriving from the worktree paths themselves (they belong
+	// to the repo that created them), only fall back to repoCwd when none resolve.
+	// This avoids cross-repo issues when cleanup targets a team created from a different repo.
 	let repoRoot: string | null = null;
-	if (opts.repoCwd) {
-		repoRoot = await findRepoRoot(opts.repoCwd);
+	for (const entry of entries) {
+		const candidate = path.join(worktreesDir, entry);
+		repoRoot = await findRepoRoot(candidate);
+		if (repoRoot) break;
 	}
-	if (!repoRoot) {
-		for (const entry of entries) {
-			const candidate = path.join(worktreesDir, entry);
-			repoRoot = await findRepoRoot(candidate);
-			if (repoRoot) break;
-		}
+	if (!repoRoot && opts.repoCwd) {
+		repoRoot = await findRepoRoot(opts.repoCwd);
 	}
 
 	const shortTeam = sanitizeName(opts.teamId).slice(0, 12) || "team";
