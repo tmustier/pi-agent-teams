@@ -10,8 +10,8 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 export type TranscriptEntry =
 	| { kind: "text"; text: string; timestamp: number }
-	| { kind: "tool_start"; toolName: string; content: string | null; timestamp: number }
-	| { kind: "tool_end"; toolName: string; content: string | null; isError: boolean; durationMs: number; timestamp: number }
+	| { kind: "tool_start"; toolName: string; content: string | null; summary: string | null; timestamp: number }
+	| { kind: "tool_end"; toolName: string; content: string | null; summary: string | null; isError: boolean; durationMs: number; timestamp: number }
 	| { kind: "turn_end"; turnNumber: number; tokens: number; timestamp: number };
 
 const MAX_TRANSCRIPT = 200;
@@ -271,7 +271,7 @@ export class TranscriptTracker {
 			starts.set(ev.toolCallId, now);
 			this.toolStarts.set(name, starts);
 			const content = extractStartContent(ev.toolName, ev.args);
-			log.push({ kind: "tool_start", toolName: ev.toolName, content, timestamp: now });
+			log.push({ kind: "tool_start", toolName: ev.toolName, content, summary: content, timestamp: now });
 			return;
 		}
 
@@ -281,7 +281,7 @@ export class TranscriptTracker {
 			const durationMs = startTs === undefined ? 0 : now - startTs;
 			starts?.delete(ev.toolCallId);
 			const content = extractEndContent(ev.isError, ev.result);
-			log.push({ kind: "tool_end", toolName: ev.toolName, content, isError: ev.isError, durationMs, timestamp: now });
+			log.push({ kind: "tool_end", toolName: ev.toolName, content, summary: content, isError: ev.isError, durationMs, timestamp: now });
 			return;
 		}
 

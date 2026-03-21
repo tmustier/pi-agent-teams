@@ -1400,8 +1400,8 @@ console.log("\n15. docs/help drift guard");
 		const e = lastEntry("alice");
 		assert(e.kind === "tool_start", "long path tool_start recorded");
 		if (e.kind === "tool_start") {
-			assert(e.summary.length <= 120, "long summary truncated to 120 chars");
-			assert(e.summary.endsWith("…"), "truncated summary ends with ellipsis");
+			assert(e.summary !== null && e.summary.length <= 120, "long summary truncated to 120 chars");
+			assert(e.summary !== null && e.summary.endsWith("…"), "truncated summary ends with ellipsis");
 		}
 	}
 }
