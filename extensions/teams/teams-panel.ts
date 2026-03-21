@@ -154,13 +154,22 @@ function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: numb
 
 	if (entry.kind === "tool_start") {
 		const verb = toolVerb(entry.toolName);
-		return [` ${tsStr}  ${theme.fg("warning", verb)}`];
+		const contentSuffix = entry.content
+			? ` ${theme.fg("dim", entry.content)}`
+			: "";
+		return [` ${tsStr}  ${theme.fg("warning", verb)}${contentSuffix}`];
 	}
 
 	if (entry.kind === "tool_end") {
 		const dur = entry.durationMs < 1000
 			? `${(entry.durationMs / 1000).toFixed(1)}s`
 			: `${(entry.durationMs / 1000).toFixed(1)}s`;
+		if (entry.isError) {
+			const errorDetail = entry.content
+				? ` ${theme.fg("dim", entry.content)}`
+				: "";
+			return [` ${tsStr}  ${theme.fg("error", `\u2717 ${entry.toolName}`)} ${theme.fg("dim", "\u2500")} ${theme.fg("dim", dur)}${errorDetail}`];
+		}
 		return [` ${tsStr}  ${theme.fg("muted", entry.toolName)} ${theme.fg("dim", "\u2500")} ${theme.fg("dim", dur)}`];
 	}
 

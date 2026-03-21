@@ -234,7 +234,7 @@ tool actions, but are continuously visible — no extra tool calls needed.
 
 - `↑/↓` or `w/s`: select teammate / scroll transcript
 - `1..9`: jump directly to teammate in overview
-- `enter`: open selected teammate transcript
+- `enter`: open selected teammate transcript (shows tool args inline: file paths, commands, patterns; errors marked with ✗)
 - `t` or `shift+t`: open selected teammate task list (task-centric view with deps/blocks); in task view, toggle back (`esc`/`t`/`shift+t`)
 - task view: `c` complete, `p` pending, `i` in-progress, `u` unassign, `r` reassign selected task
 - `m` or `d`: compose message to selected teammate

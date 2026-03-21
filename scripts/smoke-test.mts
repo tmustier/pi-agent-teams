@@ -809,6 +809,7 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("`t` or `shift+t`"), "README mentions panel task toggle key");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");
 		assert(readme.includes("`r` reassign"), "README mentions panel task reassignment");
+		assert(readme.includes("tool args inline"), "README mentions transcript tool content display");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
 		assert(readme.includes("[--urgent]"), "README mentions --urgent flag");
 		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
