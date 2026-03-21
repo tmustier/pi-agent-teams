@@ -39,8 +39,8 @@ Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations
 | `task_set_status` | `taskId`, `status` | `pending` \| `in_progress` \| `completed`. |
 | `task_dep_add` / `task_dep_rm` | `taskId`, `depId` | Dependency graph edits. |
 | `task_dep_ls` | `taskId` | Dependency/block inspection. |
-| `message_dm` | `name`, `message` | Mailbox DM. |
-| `message_broadcast` | `message` | Mailbox broadcast. |
+| `message_dm` | `name`, `message` | Mailbox DM. `urgent=true` interrupts active turns. |
+| `message_broadcast` | `message` | Mailbox broadcast. `urgent=true` interrupts active turns. |
 | `message_steer` | `name`, `message` | RPC steer for running teammate. |
 | `member_spawn` | `name` | Supports context/workspace/model/thinking/plan options. |
 | `member_shutdown` | `name` or `all=true` | Graceful mailbox shutdown request. |

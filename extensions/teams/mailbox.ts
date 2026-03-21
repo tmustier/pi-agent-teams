@@ -9,6 +9,9 @@ export interface MailboxMessage {
 	timestamp: string;
 	read: boolean;
 	color?: string;
+	/** When true, the recipient should deliver this message as a steering interrupt
+	 *  even if the agent is mid-turn, rather than queueing for the next idle window. */
+	urgent?: boolean;
 }
 
 function inboxDir(teamDir: string, namespace: string): string {
@@ -38,7 +41,8 @@ function coerceMailboxMessage(v: unknown): MailboxMessage | null {
 	if (typeof v.timestamp !== "string") return null;
 	const read = typeof v.read === "boolean" ? v.read : false;
 	const color = typeof v.color === "string" ? v.color : undefined;
-	return { from: v.from, text: v.text, timestamp: v.timestamp, read, color };
+	const urgent = typeof v.urgent === "boolean" ? v.urgent : undefined;
+	return { from: v.from, text: v.text, timestamp: v.timestamp, read, color, urgent };
 }
 
 async function readJsonArray(file: string): Promise<unknown[]> {
@@ -80,6 +84,7 @@ export async function writeToMailbox(
 				timestamp: msg.timestamp,
 				read: msg.read ?? false,
 				color: msg.color,
+				...(msg.urgent === true ? { urgent: true } : {}),
 			};
 			arr.push(m);
 			await writeJsonAtomic(inboxPath, arr);

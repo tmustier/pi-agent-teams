@@ -130,16 +130,19 @@ export function runWorker(pi: ExtensionAPI): void {
 	const TeamMessageToolParamsSchema = Type.Object({
 		recipient: Type.String({ description: "Name of the comrade to message" }),
 		message: Type.String({ description: "The message to send" }),
+		urgent: Type.Optional(Type.Boolean({
+			description: "When true, the message interrupts the recipient's active turn via steering instead of waiting for idle. Use for time-sensitive coordination.",
+		})),
 	});
 	// Match the schema at compile-time.
 	type TeamMessageToolParams = Static<typeof TeamMessageToolParamsSchema>;
 	// Tool result details to match AgentToolResult<TDetails> contract.
-	type TeamMessageToolDetails = { recipient: string; timestamp: string };
+	type TeamMessageToolDetails = { recipient: string; timestamp: string; urgent: boolean };
 
 	pi.registerTool({
 		name: "team_message",
 		label: "Team Message",
-		description: "Send a message to a comrade. Use this to coordinate with peers on related tasks.",
+		description: "Send a message to a comrade. Use this to coordinate with peers on related tasks. Set urgent=true to interrupt their active turn (use sparingly — only for time-sensitive coordination).",
 		parameters: TeamMessageToolParamsSchema,
 		async execute(
 			_toolCallId,
@@ -150,12 +153,14 @@ export function runWorker(pi: ExtensionAPI): void {
 		): Promise<AgentToolResult<TeamMessageToolDetails>> {
 			const recipient = sanitizeName(params.recipient);
 			const message = params.message;
+			const isUrgent = params.urgent === true;
 			const ts = new Date().toISOString();
 			// Write to recipient's mailbox in team namespace
 			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, recipient, {
 				from: agentName,
 				text: message,
 				timestamp: ts,
+				...(isUrgent ? { urgent: true } : {}),
 			});
 			// CC leader with peer_dm_sent notification
 			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
@@ -165,13 +170,14 @@ export function runWorker(pi: ExtensionAPI): void {
 					from: agentName,
 					to: recipient,
 					summary: message.slice(0, 100),
+					urgent: isUrgent,
 					timestamp: ts,
 				}),
 				timestamp: ts,
 			});
 			return {
-				content: [{ type: "text", text: `Message sent to ${recipient}` }],
-				details: { recipient, timestamp: ts },
+				content: [{ type: "text", text: `${isUrgent ? "Urgent message" : "Message"} sent to ${recipient}` }],
+				details: { recipient, timestamp: ts, urgent: isUrgent },
 			};
 		},
 	});
@@ -330,8 +336,14 @@ export function runWorker(pi: ExtensionAPI): void {
 						pendingTaskAssignments.push(assign.taskId);
 						continue;
 					}
-					// Plain DM (or unknown structured message)
-					pendingDmTexts.push(m.text);
+
+					// Urgent DMs interrupt the active turn via steer; normal DMs queue for idle.
+					if (m.urgent && isStreaming) {
+						const prefix = `[urgent message from ${m.from}] `;
+						pi.sendUserMessage(prefix + m.text, { deliverAs: "steer" });
+					} else {
+						pendingDmTexts.push(m.text);
+					}
 				}
 
 				if (!shutdownInProgress) await maybeStartNextWork();

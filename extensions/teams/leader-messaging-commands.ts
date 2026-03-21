@@ -73,10 +73,14 @@ export async function handleTeamDmCommand(opts: {
 }): Promise<void> {
 	const { ctx, rest, teamId, leadName, style } = opts;
 
-	const nameRaw = rest[0];
-	const msg = rest.slice(1).join(" ").trim();
+	// Parse --urgent flag from anywhere in the args
+	const isUrgent = rest.includes("--urgent");
+	const filtered = rest.filter((a) => a !== "--urgent");
+
+	const nameRaw = filtered[0];
+	const msg = filtered.slice(1).join(" ").trim();
 	if (!nameRaw || !msg) {
-		ctx.ui.notify("Usage: /team dm <name> <msg...>", "error");
+		ctx.ui.notify("Usage: /team dm <name> [--urgent] <msg...>", "error");
 		return;
 	}
 	const name = sanitizeName(nameRaw);
@@ -84,8 +88,10 @@ export async function handleTeamDmCommand(opts: {
 		from: leadName,
 		text: msg,
 		timestamp: new Date().toISOString(),
+		...(isUrgent ? { urgent: true } : {}),
 	});
-	ctx.ui.notify(`DM queued for ${formatMemberDisplayName(style, name)}`, "info");
+	const verb = isUrgent ? "Urgent DM" : "DM";
+	ctx.ui.notify(`${verb} queued for ${formatMemberDisplayName(style, name)}`, "info");
 }
 
 export async function handleTeamBroadcastCommand(opts: {
@@ -102,9 +108,13 @@ export async function handleTeamBroadcastCommand(opts: {
 	const { ctx, rest, teamId, teammates, leadName, style, refreshTasks, getTasks, getTaskListId } = opts;
 	const strings = getTeamsStrings(style);
 
-	const msg = rest.join(" ").trim();
+	// Parse --urgent flag from anywhere in the args
+	const isUrgent = rest.includes("--urgent");
+	const filtered = rest.filter((a) => a !== "--urgent");
+
+	const msg = filtered.join(" ").trim();
 	if (!msg) {
-		ctx.ui.notify("Usage: /team broadcast <msg...>", "error");
+		ctx.ui.notify("Usage: /team broadcast [--urgent] <msg...>", "error");
 		return;
 	}
 
@@ -137,12 +147,14 @@ export async function handleTeamBroadcastCommand(opts: {
 				from: leadName,
 				text: msg,
 				timestamp: ts,
+				...(isUrgent ? { urgent: true } : {}),
 			}),
 		),
 	);
 
+	const verb = isUrgent ? "Urgent broadcast" : "Broadcast";
 	ctx.ui.notify(
-		`Broadcast queued for ${names.length} ${strings.memberTitle.toLowerCase()}(s): ${names.map((n) => formatMemberDisplayName(style, n)).join(", ")}`,
+		`${verb} queued for ${names.length} ${strings.memberTitle.toLowerCase()}(s): ${names.map((n) => formatMemberDisplayName(style, n)).join(", ")}`,
 		"info",
 	);
 }

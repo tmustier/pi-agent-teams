@@ -248,6 +248,31 @@ console.log("\n3. mailbox");
 	});
 	const msgs3 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
 	assertEq(msgs3.length, 2, "pop returns 2 new unread messages");
+
+	// urgent messages
+	await writeToMailbox(teamDir, TEAM_MAILBOX_NS, "agent1", {
+		from: "peer",
+		text: "urgent interrupt",
+		timestamp: "2025-01-01T00:03:00Z",
+		urgent: true,
+	});
+	const msgs4 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
+	assertEq(msgs4.length, 1, "pop returns 1 urgent message");
+	{
+		const m = msgs4.at(0);
+		assertEq(m?.urgent, true, "urgent flag preserved");
+		assertEq(m?.text, "urgent interrupt", "urgent message text correct");
+	}
+
+	// non-urgent messages default to no urgent field
+	await writeToMailbox(teamDir, TEAM_MAILBOX_NS, "agent1", {
+		from: "peer",
+		text: "normal msg",
+		timestamp: "2025-01-01T00:04:00Z",
+	});
+	const msgs5 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
+	assertEq(msgs5.length, 1, "pop returns 1 normal message");
+	assertEq(msgs5.at(0)?.urgent, undefined, "non-urgent message has no urgent flag");
 }
 
 // ── 4. task-store ────────────────────────────────────────────────────
