@@ -72,8 +72,17 @@ function summarizeTranscriptEntry(entry: TranscriptEntry | undefined): string | 
 		if (!compact) return null;
 		return compact.length > 96 ? `${compact.slice(0, 95)}…` : compact;
 	}
-	if (entry.kind === "tool_start") return `running ${entry.toolName}`;
-	if (entry.kind === "tool_end") return `finished ${entry.toolName} (${(entry.durationMs / 1000).toFixed(1)}s)`;
+	if (entry.kind === "tool_start") {
+		const detail = entry.summary ? ` ${entry.summary}` : "";
+		const text = `running ${entry.toolName}${detail}`;
+		return text.length > 96 ? `${text.slice(0, 95)}…` : text;
+	}
+	if (entry.kind === "tool_end") {
+		const prefix = entry.isError ? "failed" : "finished";
+		const detail = entry.summary ? ` → ${entry.summary}` : "";
+		const text = `${prefix} ${entry.toolName} (${(entry.durationMs / 1000).toFixed(1)}s)${detail}`;
+		return text.length > 96 ? `${text.slice(0, 95)}…` : text;
+	}
 	const tok = formatTokens(entry.tokens);
 	return `turn ${String(entry.turnNumber)} complete (${tok} tokens)`;
 }
@@ -142,14 +151,33 @@ function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: numb
 
 	if (entry.kind === "tool_start") {
 		const verb = toolVerb(entry.toolName);
-		return [` ${tsStr}  ${theme.fg("warning", verb)}`];
+		const lines: string[] = [` ${tsStr}  ${theme.fg("warning", verb)}`];
+		if (entry.summary) {
+			const detail = entry.summary.length > maxTextWidth
+				? `${entry.summary.slice(0, maxTextWidth - 1)}…`
+				: entry.summary;
+			lines.push(` ${" ".repeat(10)}${theme.fg("dim", detail)}`);
+		}
+		return lines;
 	}
 
 	if (entry.kind === "tool_end") {
-		const dur = entry.durationMs < 1000
-			? `${(entry.durationMs / 1000).toFixed(1)}s`
-			: `${(entry.durationMs / 1000).toFixed(1)}s`;
-		return [` ${tsStr}  ${theme.fg("muted", entry.toolName)} ${theme.fg("dim", "\u2500")} ${theme.fg("dim", dur)}`];
+		const dur = `${(entry.durationMs / 1000).toFixed(1)}s`;
+		const durColor: ThemeColor = entry.isError ? "error" : "dim";
+		const nameColor: ThemeColor = entry.isError ? "error" : "muted";
+		const statusIndicator = entry.isError ? " ✗" : "";
+		const lines: string[] = [
+			` ${tsStr}  ${theme.fg(nameColor, entry.toolName)}${theme.fg("error", statusIndicator)} ${theme.fg("dim", "\u2500")} ${theme.fg(durColor, dur)}`,
+		];
+		if (entry.summary) {
+			const prefix = entry.isError ? "error: " : "→ ";
+			const prefixColor: ThemeColor = entry.isError ? "error" : "dim";
+			const detail = entry.summary.length > maxTextWidth - prefix.length
+				? `${entry.summary.slice(0, maxTextWidth - prefix.length - 1)}…`
+				: entry.summary;
+			lines.push(` ${" ".repeat(10)}${theme.fg(prefixColor, prefix)}${theme.fg("dim", detail)}`);
+		}
+		return lines;
 	}
 
 	if (entry.kind === "turn_end") {

@@ -1,14 +1,112 @@
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 
+// ── Helpers ──
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
 // ── Transcript types ──
 
 export type TranscriptEntry =
 	| { kind: "text"; text: string; timestamp: number }
-	| { kind: "tool_start"; toolName: string; timestamp: number }
-	| { kind: "tool_end"; toolName: string; durationMs: number; timestamp: number }
+	| { kind: "tool_start"; toolName: string; summary: string; timestamp: number }
+	| { kind: "tool_end"; toolName: string; durationMs: number; summary: string; isError: boolean; timestamp: number }
 	| { kind: "turn_end"; turnNumber: number; tokens: number; timestamp: number };
 
 const MAX_TRANSCRIPT = 200;
+const MAX_SUMMARY_LENGTH = 120;
+
+// ── Tool content summarization ──
+
+function truncateSummary(text: string): string {
+	if (text.length <= MAX_SUMMARY_LENGTH) return text;
+	return `${text.slice(0, MAX_SUMMARY_LENGTH - 1)}…`;
+}
+
+function summarizeToolArgs(toolName: string, args: unknown): string {
+	if (!isRecord(args)) return "";
+	const key = toolName.toLowerCase();
+
+	if (key === "read" || key === "write") {
+		const path = typeof args.path === "string" ? args.path : null;
+		if (!path) return "";
+		return truncateSummary(path);
+	}
+
+	if (key === "edit") {
+		const path = typeof args.path === "string" ? args.path : null;
+		if (!path) return "";
+		return truncateSummary(path);
+	}
+
+	if (key === "bash") {
+		const cmd = typeof args.command === "string" ? args.command : null;
+		if (!cmd) return "";
+		return truncateSummary(cmd.replace(/\s+/g, " ").trim());
+	}
+
+	if (key === "grep" || key === "glob") {
+		const pattern = typeof args.pattern === "string" ? args.pattern : null;
+		const path = typeof args.path === "string" ? args.path : null;
+		const parts: string[] = [];
+		if (pattern) parts.push(pattern);
+		if (path) parts.push(`in ${path}`);
+		return truncateSummary(parts.join(" "));
+	}
+
+	if (key === "webfetch" || key === "websearch") {
+		const url = typeof args.url === "string" ? args.url : null;
+		const query = typeof args.query === "string" ? args.query : null;
+		return truncateSummary(url ?? query ?? "");
+	}
+
+	if (key === "task" || key === "teams") {
+		const action = typeof args.action === "string" ? args.action : null;
+		return action ? truncateSummary(action) : "";
+	}
+
+	// Fallback: try to find a meaningful first-string arg
+	for (const v of Object.values(args)) {
+		if (typeof v === "string" && v.length > 0) return truncateSummary(v);
+	}
+	return "";
+}
+
+function summarizeToolResult(toolName: string, result: unknown, isError: boolean): string {
+	if (isError) {
+		if (typeof result === "string") return truncateSummary(result.replace(/\s+/g, " ").trim());
+		if (isRecord(result)) {
+			const msg = typeof result.message === "string"
+				? result.message
+				: typeof result.error === "string"
+					? result.error
+					: null;
+			if (msg) return truncateSummary(msg.replace(/\s+/g, " ").trim());
+		}
+		return "error";
+	}
+
+	if (typeof result === "string") {
+		const compact = result.replace(/\s+/g, " ").trim();
+		if (compact.length === 0) return "(empty)";
+		return truncateSummary(compact);
+	}
+
+	if (Array.isArray(result)) {
+		return `${String(result.length)} items`;
+	}
+
+	if (isRecord(result)) {
+		// Check for common structured result shapes
+		const status = typeof result.status === "string" ? result.status : null;
+		if (status) return truncateSummary(status);
+		const output = typeof result.output === "string" ? result.output : null;
+		if (output) return truncateSummary(output.replace(/\s+/g, " ").trim());
+	}
+
+	return "";
+}
 
 export class TranscriptLog {
 	private entries: TranscriptEntry[] = [];
@@ -61,7 +159,8 @@ export class TranscriptTracker {
 			const starts = this.toolStarts.get(name) ?? new Map<string, number>();
 			starts.set(ev.toolCallId, now);
 			this.toolStarts.set(name, starts);
-			log.push({ kind: "tool_start", toolName: ev.toolName, timestamp: now });
+			const summary = summarizeToolArgs(ev.toolName, ev.args);
+			log.push({ kind: "tool_start", toolName: ev.toolName, summary, timestamp: now });
 			return;
 		}
 
@@ -70,7 +169,8 @@ export class TranscriptTracker {
 			const startTs = starts?.get(ev.toolCallId);
 			const durationMs = startTs === undefined ? 0 : now - startTs;
 			starts?.delete(ev.toolCallId);
-			log.push({ kind: "tool_end", toolName: ev.toolName, durationMs, timestamp: now });
+			const summary = summarizeToolResult(ev.toolName, ev.result, ev.isError);
+			log.push({ kind: "tool_end", toolName: ev.toolName, durationMs, summary, isError: ev.isError, timestamp: now });
 			return;
 		}
 
@@ -147,10 +247,6 @@ export class TranscriptTracker {
 // ── Activity types ──
 
 type TrackedEventType = "tool_execution_start" | "tool_execution_end" | "agent_end" | "message_end";
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-	return typeof v === "object" && v !== null;
-}
 
 export interface TeammateActivity {
 	toolUseCount: number;
