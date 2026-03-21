@@ -13,7 +13,7 @@ Core agent-teams primitives, matching Claude's design:
 - **Direct messages and broadcast** — send a message to one teammate or all of them at once, via file-based mailboxes. Urgent messages can interrupt active turns via steering.
 - **Graceful lifecycle** — spawn, stop, shutdown (with handshake), or kill teammates. The leader tracks who's online, idle, or streaming.
 - **LLM-callable teams tool** — the model can spawn teammates, delegate tasks, mutate task assignment/status/dependencies, message teammates, and run lifecycle actions in tool calls (no slash commands needed).
-- **Team cleanup** — tear down all team artifacts (tasks, mailboxes, sessions, worktrees) when you're done.
+- **Team done + cleanup** — `/team done` ends a run (stops teammates, hides the widget, notifies with a summary); the widget auto-detects when all tasks are complete and shows a hint. `/team cleanup` tears down artifacts afterward.
 
 Additional Pi-specific capabilities:
 
@@ -110,6 +110,9 @@ Or drive it manually:
 
 /tw                                        # open the interactive widget panel
 
+/team done                                 # end run: stop teammates + hide widget
+/team done --force                         # end run even with in-progress tasks
+
 /team shutdown alice                       # graceful shutdown (handshake)
 /team shutdown                             # stop all teammates (leader session remains active)
 /team cleanup                              # remove team artifacts (worktrees, branches, team dir)
@@ -151,6 +154,7 @@ Or let the model drive it with the delegate tool:
 | `member_shutdown` | `name` or `all=true` | Request graceful shutdown via mailbox handshake. |
 | `member_kill` | `name` | Force-stop one RPC teammate and unassign active tasks. |
 | `member_prune` | _(none)_ | Mark stale non-RPC workers offline (`all=true` to force). |
+| `team_done` | _(none)_ | End team run: stop all teammates, mark workers offline, hide widget (`all=true` to force with in-progress tasks). |
 | `plan_approve` | `name` | Approve pending plan for a plan-required teammate. |
 | `plan_reject` | `name` | Reject pending plan (`feedback` optional). |
 | `hooks_policy_get` | _(none)_ | Read team hooks policy (configured + effective with env fallback). |
@@ -170,6 +174,7 @@ Example calls:
 { "action": "hooks_policy_get" }
 { "action": "hooks_policy_set", "hookFailureAction": "reopen_followup", "hookMaxReopensPerTask": 2, "hookFollowupOwner": "member" }
 { "action": "model_policy_get" }
+{ "action": "team_done" }
 { "action": "model_policy_check", "model": "openai-codex/gpt-5.1-codex-mini" }
 ```
 
@@ -208,6 +213,7 @@ All management commands live under `/team`.
 | `/team shutdown` | Stop all teammates (RPC + best-effort manual) (leader session remains active) |
 | `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
 | `/team kill <name>` | Force-terminate |
+| `/team done [--force]` | End run: stop teammates + hide widget (auto-detects when all tasks complete) |
 | `/team cleanup [--force]` | Delete team artifacts (worktrees, branches, team dir) |
 | `/team gc [--dry-run] [--force] [--max-age-hours=N]` | Garbage-collect stale team dirs older than N hours (default: 24) |
 | `/team id` | Print team/task-list IDs and paths |

@@ -71,6 +71,24 @@ export function formatTokens(n: number): string {
 }
 
 /**
+ * Check if all tasks are completed and all teammates are idle/stopped.
+ * Used by the widget (done hint) and leader (auto-done detection).
+ */
+export function isTeamDone(
+	tasks: readonly TeamTask[],
+	teammates: ReadonlyMap<string, TeammateRpc>,
+): boolean {
+	if (tasks.length === 0) return false;
+	const pending = tasks.filter((t) => t.status === "pending").length;
+	const inProgress = tasks.filter((t) => t.status === "in_progress").length;
+	if (pending > 0 || inProgress > 0) return false;
+	for (const [, rpc] of teammates) {
+		if (rpc.status === "streaming" || rpc.status === "starting") return false;
+	}
+	return true;
+}
+
+/**
  * Extract the model label from a TeamMember's freeform metadata.
  *
  * Stored as `meta.model` (e.g. "anthropic/claude-sonnet-4-5-20250514").

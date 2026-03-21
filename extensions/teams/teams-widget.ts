@@ -14,6 +14,7 @@ import {
 	getMemberModel,
 	getMemberThinking,
 	getVisibleWorkerNames,
+	isTeamDone,
 	padRight,
 	renderPolicySummary,
 	resolveStatus,
@@ -238,10 +239,15 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 				}
 
 				// ── Hints line ──
-				const hints = theme.fg(
-					"dim",
-					" /team widget \u00b7 /team dm <name> <msg> \u00b7 /team task list",
-				);
+				const teamDone = isTeamDone(tasks, teammates);
+				const hints = teamDone
+					? theme.fg("success", " All tasks done.") +
+						" " +
+						theme.fg("dim", "/team done \u00b7 /team task list")
+					: theme.fg(
+							"dim",
+							" /team widget \u00b7 /team dm <name> <msg> \u00b7 /team task list",
+						);
 				lines.push(truncateToWidth(hints, width));
 
 				return lines;

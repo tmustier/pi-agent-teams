@@ -59,6 +59,7 @@ const TeamsActionSchema = StringEnum(
 		"member_shutdown",
 		"member_kill",
 		"member_prune",
+		"team_done",
 		"plan_approve",
 		"plan_reject",
 		"hooks_policy_get",
@@ -115,7 +116,7 @@ const TeamsToolParamsSchema = Type.Object({
 	message: Type.Optional(Type.String({ description: "Message body for messaging actions." })),
 	reason: Type.Optional(Type.String({ description: "Optional reason for lifecycle actions." })),
 	feedback: Type.Optional(Type.String({ description: "Feedback for action=plan_reject." })),
-	all: Type.Optional(Type.Boolean({ description: "For member_shutdown/member_prune, apply to all workers." })),
+	all: Type.Optional(Type.Boolean({ description: "For member_shutdown/member_prune: apply to all workers. For team_done: force even with in-progress tasks." })),
 	planRequired: Type.Optional(Type.Boolean({ description: "For member_spawn, start worker in plan-required mode." })),
 	teammates: Type.Optional(
 		Type.Array(Type.String(), {
@@ -158,9 +159,11 @@ export function registerTeamsTool(opts: {
 	getTaskListId: () => string | null;
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
+	hideWidget: () => void;
+	stopAllTeammates: (reason: string) => Promise<void>;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 }): void {
-	const { pi, teammates, spawnTeammate, getTeamId, getTaskListId, refreshTasks, renderWidget, pendingPlanApprovals } = opts;
+	const { pi, teammates, spawnTeammate, getTeamId, getTaskListId, refreshTasks, renderWidget, hideWidget, stopAllTeammates, pendingPlanApprovals } = opts;
 
 	pi.registerTool({
 		name: "teams",
@@ -168,6 +171,7 @@ export function registerTeamsTool(opts: {
 		description: [
 			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
 			"You can also mutate existing tasks (assign, unassign, set status, dependencies), send team messages, run teammate lifecycle actions, and manage hooks/model policy without user slash commands.",
+			"Use team_done to end a team run when all tasks are complete (stops teammates, hides widget).",
 			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
 			"Optional overrides: model='<provider>/<modelId>' and thinking (off|minimal|low|medium|high|xhigh).",
@@ -655,6 +659,79 @@ export function registerTeamsTool(opts: {
 				return {
 					content: [{ type: "text", text: `Pruned ${pruned.length} stale ${strings.memberTitle.toLowerCase()}(s): ${pruned.map((n) => formatMemberDisplayName(style, n)).join(", ")}` }],
 					details: { action, teamId, pruned },
+				};
+			}
+
+			if (action === "team_done") {
+				const tasks = await listTasks(teamDir, effectiveTlId);
+				const inProgress = tasks.filter((t) => t.status === "in_progress");
+				const force = params.all === true;
+
+				if (inProgress.length > 0 && !force) {
+					return {
+						content: [{
+							type: "text",
+							text: `${inProgress.length} task(s) still in progress. Set all=true to force.`,
+						}],
+						details: {
+							action,
+							teamId,
+							status: "blocked",
+							reason: "tasks_in_progress",
+							inProgress: inProgress.length,
+							hint: "Set all=true to force, or wait for tasks to complete.",
+						},
+					};
+				}
+
+				// Stop all RPC teammates (reuses leader's stopAllTeammates for proper
+				// event unsub + tracker/transcript cleanup — avoids stale state on reuse).
+				await stopAllTeammates("team done");
+
+				// Mark config workers offline + send shutdown mailbox messages
+				const cfgWorkers = cfg.members.filter((m) => m.role === "worker" && m.status === "online");
+				for (const m of cfgWorkers) {
+					if (teammates.has(m.name)) continue; // already stopped via RPC above
+					const ts = new Date().toISOString();
+					try {
+						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, m.name, {
+							from: cfg.leadName,
+							text: JSON.stringify({
+								type: "shutdown_request",
+								requestId: randomUUID(),
+								from: cfg.leadName,
+								timestamp: ts,
+								reason: "Team done",
+							}),
+							timestamp: ts,
+						});
+					} catch {
+						// ignore mailbox errors
+					}
+					await setMemberStatus(teamDir, m.name, "offline", {
+						meta: { stoppedReason: "team-done", stoppedAt: ts },
+					});
+				}
+
+				await refreshTasks();
+				hideWidget();
+
+				const completed = tasks.filter((t) => t.status === "completed").length;
+				const pending = tasks.filter((t) => t.status === "pending").length;
+				return {
+					content: [{
+						type: "text",
+						text: `Team done. ${tasks.length} task(s): ${completed} completed, ${pending} pending${inProgress.length > 0 ? `, ${inProgress.length} were in-progress (unassigned)` : ""}. Widget hidden.`,
+					}],
+					details: {
+						action,
+						teamId,
+						status: "succeeded",
+						total: tasks.length,
+						completed,
+						pending,
+						unassigned: inProgress.length,
+					},
 				};
 			}
 

@@ -529,6 +529,116 @@ export async function handleTeamStopCommand(opts: {
 	renderWidget();
 }
 
+/**
+ * `/team done` — end-of-run cleanup.
+ *
+ * Stops all teammates, hides the widget, and optionally cleans up team artifacts.
+ * This is the "team is finished" ergonomic counterpart to `/team cleanup`.
+ *
+ * Behavior:
+ * 1. Stops all RPC teammates (graceful, no confirmation prompt).
+ * 2. Marks all config-only workers offline.
+ * 3. Hides the Teams widget.
+ * 4. Notifies the user with a summary.
+ *
+ * Use `/team cleanup [--force]` afterward if you also want to delete task/mailbox files.
+ */
+export async function handleTeamDoneCommand(opts: {
+	ctx: ExtensionCommandContext;
+	rest: string[];
+	teamId: string;
+	teammates: Map<string, TeammateRpc>;
+	getTeamConfig: () => TeamConfig | null;
+	leadName: string;
+	style: TeamsStyle;
+	stopAllTeammates: (ctx: ExtensionContext, reason: string) => Promise<void>;
+	refreshTasks: () => Promise<void>;
+	getTasks: () => TeamTask[];
+	hideWidget: () => void;
+}): Promise<void> {
+	const { ctx, rest, teamId, teammates, getTeamConfig, leadName, style, stopAllTeammates, refreshTasks, getTasks, hideWidget } = opts;
+	const strings = getTeamsStrings(style);
+
+	const flags = rest.filter((a) => a.startsWith("--"));
+	const unknownFlags = flags.filter((f) => f !== "--force");
+	if (unknownFlags.length) {
+		ctx.ui.notify(`Unknown flag(s): ${unknownFlags.join(", ")}`, "error");
+		return;
+	}
+
+	await refreshTasks();
+	const tasks = getTasks();
+	const inProgress = tasks.filter((t) => t.status === "in_progress");
+
+	if (inProgress.length > 0 && !flags.includes("--force")) {
+		ctx.ui.notify(
+			`${inProgress.length} task(s) still in progress. Use /team done --force to end anyway.`,
+			"error",
+		);
+		return;
+	}
+
+	// Stop all RPC teammates
+	const reason = formatTeamsTemplate(strings.teamEndedAllStopped, {
+		members: `${strings.memberTitle.toLowerCase()}s`,
+		count: String(teammates.size),
+	});
+	await stopAllTeammates(ctx, reason);
+
+	// Mark manual/config workers offline
+	const cfg = getTeamConfig();
+	const teamDir = getTeamDir(teamId);
+	const manualWorkers = (cfg?.members ?? []).filter((m) => m.role === "worker" && m.status === "online");
+	for (const m of manualWorkers) {
+		if (teammates.has(m.name)) continue;
+		const ts = new Date().toISOString();
+		try {
+			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, m.name, {
+				from: leadName,
+				text: JSON.stringify({
+					type: "shutdown_request",
+					requestId: randomUUID(),
+					from: leadName,
+					timestamp: ts,
+					reason: "Team done",
+				}),
+				timestamp: ts,
+			});
+		} catch {
+			// ignore
+		}
+		await setMemberStatus(teamDir, m.name, "offline", {
+			meta: { stoppedReason: "team-done", stoppedAt: ts },
+		});
+	}
+
+	// Unassign any in-progress tasks (force mode)
+	if (inProgress.length > 0) {
+		for (const task of inProgress) {
+			if (task.owner) {
+				await unassignTasksForAgent(teamDir, cfg?.taskListId ?? teamId, task.owner, "team done");
+			}
+		}
+	}
+
+	await refreshTasks();
+
+	// Hide the widget
+	hideWidget();
+
+	// Summary
+	const completed = tasks.filter((t) => t.status === "completed").length;
+	const pending = tasks.filter((t) => t.status === "pending").length;
+	const total = tasks.length;
+
+	const summaryParts = [`Team done. ${total} task(s): ${completed} completed`];
+	if (pending > 0) summaryParts.push(`${pending} pending`);
+	if (inProgress.length > 0) summaryParts.push(`${inProgress.length} were in-progress (unassigned)`);
+	summaryParts.push("Widget hidden. Use /team cleanup to remove artifacts.");
+
+	ctx.ui.notify(summaryParts.join(", ") + ".", "info");
+}
+
 export async function handleTeamKillCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
