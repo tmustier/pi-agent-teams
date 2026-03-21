@@ -19,6 +19,7 @@ Additional Pi-specific capabilities:
 
 - **Git worktrees** — optionally give each teammate its own worktree so they work on isolated branches without conflicting edits.
 - **Session branching** — clone the leader's conversation context into a teammate so it starts with full awareness of the work so far, instead of from scratch.
+- **Completion notifications** — when a teammate finishes or fails a task, the leader LLM receives a structured `[Team]` message with task ID, subject, result summary, and progress counters so it can orchestrate autonomously without human intervention. When quality-gate hooks are active, the message warns that task states may still change.
 - **Hooks / quality gates** — optional leader-side hooks on idle / task completion to run scripts (opt-in).
 
 ## UI style (terminology + naming)

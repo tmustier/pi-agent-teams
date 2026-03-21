@@ -665,6 +665,9 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 			pendingPlanApprovals,
 			enqueueHook,
+			sendLeaderLlmMessage: (content, options) => {
+				pi.sendUserMessage(content, options);
+			},
 		});
 	};
 

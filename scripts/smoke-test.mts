@@ -66,6 +66,8 @@ import {
 	isPlanApprovedMessage,
 	isPlanRejectedMessage,
 } from "../extensions/teams/protocol.js";
+import { pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 // ── helpers ──────────────────────────────────────────────────────────
 let passed = 0;
@@ -943,8 +945,165 @@ console.log("\n13. formatElapsed + lastMessageSummary");
 	assert(lastMessageSummary(shortRpc, 20) === "Short", "lastMessageSummary keeps short text intact");
 }
 
-// ── 14. docs/help drift guard ────────────────────────────────────────
-console.log("\n14. docs/help drift guard");
+// ── 14. leader-inbox LLM message injection ───────────────────────────
+console.log("\n14. leader-inbox LLM message injection");
+{
+	const inboxTeamDir = path.join(tmpRoot, "inbox-test");
+	const inboxTaskListId = "inbox-tl";
+	const leadName = "team-lead";
+	const style = "default";
+
+	// Set up team config
+	await ensureTeamConfig(inboxTeamDir, { teamId: "inbox-team", taskListId: inboxTaskListId, leadName, style });
+
+	// Create and complete a task with a result
+	const t1 = await createTask(inboxTeamDir, inboxTaskListId, { subject: "Fix tests", description: "", owner: "alice" });
+	await completeTask(inboxTeamDir, inboxTaskListId, t1.id, "alice", "All 12 tests passing");
+
+	// Write an idle notification with completedTaskId
+	const ts = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "alice",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "alice",
+			timestamp: ts,
+			completedTaskId: t1.id,
+			completedStatus: "completed",
+		}),
+		timestamp: ts,
+	});
+
+	// Track messages sent to leader LLM
+	const llmMessages: Array<{ content: string; options?: { deliverAs?: string } }> = [];
+
+	// Minimal ExtensionContext stub
+	const stubCtx = {
+		cwd: inboxTeamDir,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "inbox-team" },
+	} as unknown as ExtensionContext;
+
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+	});
+
+	assert(llmMessages.length === 1, "one LLM message sent on task completion");
+	const msg0 = llmMessages[0];
+	if (msg0) {
+		assert(msg0.content.includes("[Team]"), "LLM message has [Team] prefix");
+		assert(msg0.content.includes("alice"), "LLM message includes worker name");
+		assert(msg0.content.includes(t1.id), "LLM message includes task id");
+		assert(msg0.content.includes("Fix tests"), "LLM message includes task subject");
+		assert(msg0.content.includes("All 12 tests passing"), "LLM message includes result");
+		assert(msg0.content.includes("All 1 task(s) are now completed"), "LLM message includes allDone summary");
+		assertEq(msg0.options?.deliverAs, "followUp", "LLM message uses followUp delivery");
+	}
+
+	// Test failure path with abort metadata
+	const t2 = await createTask(inboxTeamDir, inboxTaskListId, { subject: "Deploy staging", description: "", owner: "bob" });
+	await updateTask(inboxTeamDir, inboxTaskListId, t2.id, (cur) => ({
+		...cur,
+		status: "pending",
+		metadata: {
+			...(cur.metadata ?? {}),
+			abortReason: "timeout after 60s",
+			partialResult: "Deployed but health check failed",
+		},
+	}));
+
+	const ts2 = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "bob",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "bob",
+			timestamp: ts2,
+			completedTaskId: t2.id,
+			completedStatus: "failed",
+		}),
+		timestamp: ts2,
+	});
+
+	llmMessages.length = 0;
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+	});
+
+	assert(llmMessages.length === 1, "one LLM message sent on task failure");
+	const failMsg = llmMessages[0];
+	if (failMsg) {
+		assert(failMsg.content.includes("failed"), "failure LLM message includes failed");
+		assert(failMsg.content.includes("timeout after 60s"), "failure LLM message includes abortReason");
+		assert(failMsg.content.includes("health check failed"), "failure LLM message includes partialResult");
+	}
+
+	// Test hook-aware allDone qualifier
+	const t3 = await createTask(inboxTeamDir, inboxTaskListId, { subject: "Final task", description: "", owner: "carol" });
+	await completeTask(inboxTeamDir, inboxTaskListId, t3.id, "carol", "Done");
+	// Also complete t2 so all tasks are done
+	await updateTask(inboxTeamDir, inboxTaskListId, t2.id, (cur) => ({
+		...cur,
+		status: "completed",
+		owner: "bob",
+	}));
+
+	const ts3 = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "carol",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "carol",
+			timestamp: ts3,
+			completedTaskId: t3.id,
+			completedStatus: "completed",
+		}),
+		timestamp: ts3,
+	});
+
+	llmMessages.length = 0;
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		enqueueHook: () => {}, // hooks present → should qualify allDone
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+	});
+
+	assert(llmMessages.length === 1, "one LLM message sent with hooks active");
+	const hookMsg = llmMessages[0];
+	if (hookMsg) {
+		assert(hookMsg.content.includes("quality gates are still running"), "allDone qualified when hooks active");
+		assert(!hookMsg.content.includes("Review results and determine next steps"), "no premature wrap-up prompt when hooks active");
+	}
+}
+
+// ── 15. docs/help drift guard ────────────────────────────────────────
+console.log("\n15. docs/help drift guard");
 {
 	const help = getTeamHelpText();
 	assert(help.includes("/team done"), "help mentions /team done");
