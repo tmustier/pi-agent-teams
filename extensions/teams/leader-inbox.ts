@@ -215,12 +215,16 @@ export async function pollLeaderInbox(opts: {
 					if (sendLeaderLlmMessage) {
 						const task = await getTask(teamDir, taskListId, idle.completedTaskId);
 						const subject = task?.subject ? `: ${task.subject}` : "";
-						const resultRaw = task?.metadata?.["result"];
-						const result = typeof resultRaw === "string" ? truncateResult(resultRaw, 500) : undefined;
+						// Failed tasks store abort details, not the success-only `result` field.
+						const abortReasonRaw = task?.metadata?.["abortReason"];
+						const partialResultRaw = task?.metadata?.["partialResult"];
+						const abortReason = typeof abortReasonRaw === "string" ? truncateResult(abortReasonRaw, 300) : undefined;
+						const partialResult = typeof partialResultRaw === "string" ? truncateResult(partialResultRaw, 300) : undefined;
 						const lines = [
 							`[Team] ${formatMemberDisplayName(style, name)} failed task #${idle.completedTaskId}${subject}`,
 						];
-						if (result) lines.push(`Result: ${result}`);
+						if (abortReason) lines.push(`Reason: ${abortReason}`);
+						if (partialResult) lines.push(`Partial result: ${partialResult}`);
 						sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
 					}
 				} else if (idle.completedTaskId) {
@@ -245,7 +249,12 @@ export async function pollLeaderInbox(opts: {
 
 						if (allDone) {
 							lines.push("");
-							lines.push(`All ${totalTasks} task(s) are now completed. Review results and determine next steps.`);
+							if (enqueueHook) {
+								// Hooks run asynchronously and may reopen tasks or create follow-ups.
+								lines.push(`All ${totalTasks} task(s) show completed — quality gates are still running and may change task states.`);
+							} else {
+								lines.push(`All ${totalTasks} task(s) are now completed. Review results and determine next steps.`);
+							}
 						} else {
 							const pending = allTasks.filter((t) => t.status === "pending").length;
 							const inProgress = allTasks.filter((t) => t.status === "in_progress").length;
