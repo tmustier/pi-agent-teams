@@ -1,26 +1,28 @@
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme, ThemeColor, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
+import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ActivityTracker, TranscriptLog, TranscriptEntry } from "./activity-tracker.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import {
-	STATUS_COLOR,
-	STATUS_ICON,
+	DISPLAY_STATUS_COLOR,
+	DISPLAY_STATUS_ICON,
+	formatElapsed,
 	formatTokens,
 	getMemberModel,
 	getMemberThinking,
 	getVisibleWorkerNames,
+	lastMessageSummary,
 	padRight,
 	renderPolicySummary,
-	resolveStatus,
+	resolveDisplayStatus,
 	shortModelLabel,
 	toolActivity,
 	toolVerb,
 } from "./teams-ui-shared.js";
-import type { LeaderModelInfo } from "./teams-ui-shared.js";
+import type { DisplayStatus, LeaderModelInfo } from "./teams-ui-shared.js";
 
 export interface InteractiveWidgetDeps {
 	getTeammates(): Map<string, TeammateRpc>;
@@ -59,11 +61,13 @@ interface Row {
 	iconColor: ThemeColor;
 	name: string;
 	displayName: string;
-	statusKey: TeammateStatus;
+	statusKey: DisplayStatus;
 	pending: number;
 	completed: number;
 	tokensStr: string;
 	activityText: string;
+	elapsedStr: string;
+	lastMsgStr: string;
 	isChairman: boolean;
 	/** Short model label (e.g. "claude-sonnet-4-5") or null. */
 	modelLabel: string | null;
@@ -318,6 +322,8 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							completed: leadTasks.filter((t) => t.status === "completed").length,
 							tokensStr: "\u2014",
 							activityText: "",
+							elapsedStr: "",
+							lastMsgStr: "",
 							isChairman: true,
 							name: leadName,
 							modelLabel: null,
@@ -331,22 +337,25 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					for (const name of memberNames) {
 						const rpc = teammates.get(name);
 						const cfg = cfgByName.get(name);
-						const statusKey = resolveStatus(rpc, cfg);
+						const statusKey = resolveDisplayStatus(rpc, cfg);
 						const activity = tracker.get(name);
 						const owned = tasks.filter((t) => t.owner === name);
 						const activeTask = owned.find((t) => t.status === "in_progress");
 						const memberModel = getMemberModel(cfg);
 						const memberThinking = getMemberThinking(cfg);
+						const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
 
 						rows.push({
-							icon: STATUS_ICON[statusKey],
-							iconColor: STATUS_COLOR[statusKey],
+							icon: DISPLAY_STATUS_ICON[statusKey],
+							iconColor: DISPLAY_STATUS_COLOR[statusKey],
 							displayName: formatMemberDisplayName(style, name),
 							statusKey,
 							pending: owned.filter((t) => t.status === "pending").length,
 							completed: owned.filter((t) => t.status === "completed").length,
 							tokensStr: formatTokens(activity.totalTokens),
 							activityText: toolActivity(activity.currentToolName),
+							elapsedStr: elapsed,
+							lastMsgStr: lastMessageSummary(rpc, 80),
 							isChairman: false,
 							name,
 							modelLabel: memberModel ? shortModelLabel(memberModel) : null,
@@ -424,7 +433,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							const styledName = isSelected
 								? theme.bold(theme.fg("accent", r.displayName))
 								: theme.bold(r.displayName);
-							const statusLabel = theme.fg(STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
+							const statusLabel = theme.fg(DISPLAY_STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
 							const pNum = String(r.pending).padStart(pW);
 							const cNum = String(r.completed).padStart(cW);
 							const tokStr = r.tokensStr.padStart(tokW);
@@ -432,6 +441,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 								"dim",
 								` \u00b7 ${pNum} pending \u00b7 ${cNum} complete \u00b7 ${tokStr} tokens`,
 							);
+							const elapsedLabel = r.elapsedStr ? " " + theme.fg("dim", r.elapsedStr) : "";
 							const actLabel = r.activityText
 								? "  " + theme.fg("warning", r.activityText)
 								: "";
@@ -441,7 +451,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							if (r.thinkingLabel && r.thinkingLabel !== "off") badges.push(`t:${r.thinkingLabel}`);
 							const badgeStr = badges.length > 0 ? "  " + theme.fg("muted", badges.join(" \u00b7 ")) : "";
 
-							const row = `${pointer}${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${cols}${actLabel}${badgeStr}`;
+							const row = `${pointer}${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${elapsedLabel}${cols}${actLabel}${badgeStr}`;
 							lines.push(truncateToWidth(row, width));
 							// Active task on second line (indented, only when actively working)
 							if (r.activeTaskSubject) {
@@ -473,6 +483,10 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const selectedName = memberNames[cursorIndex];
 					if (selectedName) {
 						const selectedLabel = formatMemberDisplayName(style, selectedName);
+						const selectedRpc = deps.getTeammates().get(selectedName);
+						const selectedCfg = (deps.getTeamConfig()?.members ?? []).find((m) => m.name === selectedName);
+						const selectedDisplayStatus = resolveDisplayStatus(selectedRpc, selectedCfg);
+						const selectedElapsed = selectedRpc ? formatElapsed(Date.now() - selectedRpc.lastStatusChangeAt) : "";
 						const owned = tasks.filter((t) => t.owner === selectedName);
 						const activeTask = owned.find((t) => t.status === "in_progress");
 						const latestCompleted = owned
@@ -481,8 +495,16 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							.at(0);
 						const entries = deps.getTranscript(selectedName).getEntries();
 						const lastSummary = summarizeTranscriptEntry(entries.at(-1));
+						const msgSummary = lastMessageSummary(selectedRpc, 80);
 
-						lines.push(truncateToWidth(` ${theme.fg("muted", "selected:")} ${theme.bold(theme.fg("accent", selectedLabel))}`, width));
+						const statusTag = theme.fg(DISPLAY_STATUS_COLOR[selectedDisplayStatus], selectedDisplayStatus);
+						const elapsedTag = selectedElapsed ? ` ${theme.fg("dim", selectedElapsed)}` : "";
+						lines.push(truncateToWidth(` ${theme.fg("muted", "selected:")} ${theme.bold(theme.fg("accent", selectedLabel))} ${statusTag}${elapsedTag}`, width));
+						// Show model if available in team config meta
+						const selectedModel = selectedCfg?.meta?.["model"];
+						if (typeof selectedModel === "string" && selectedModel) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "model:")} ${theme.fg("muted", selectedModel)}`, width));
+						}
 						if (activeTask) {
 							lines.push(
 								truncateToWidth(
@@ -500,6 +522,13 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						}
 						if (lastSummary) {
 							lines.push(truncateToWidth(` ${theme.fg("dim", "last event:")} ${theme.fg("muted", lastSummary)}`, width));
+						}
+						if (msgSummary) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "last msg:")} ${theme.fg("muted", msgSummary)}`, width));
+						}
+						if (selectedDisplayStatus === "stalled") {
+							const stalledSince = selectedRpc ? formatElapsed(Date.now() - selectedRpc.lastEventAt) : "";
+							lines.push(truncateToWidth(` ${theme.fg("warning", `\u26a0 no events for ${stalledSince} — may be stalled`)}`, width));
 						}
 					}
 
@@ -525,7 +554,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 
 					const rpc = deps.getTeammates().get(sessionName);
 					const cfg = (deps.getTeamConfig()?.members ?? []).find((m) => m.name === sessionName);
-					const statusKey = resolveStatus(rpc, cfg);
+					const statusKey = resolveDisplayStatus(rpc, cfg);
 					const activity = deps.getTracker().get(sessionName);
 					const tasks = deps.getTasks();
 					const activeTask = tasks.find(
@@ -537,9 +566,11 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const sep = theme.fg("dim", "\u2500".repeat(Math.max(0, width - 2)));
 
 					// Header
-					const icon = theme.fg(STATUS_COLOR[statusKey], STATUS_ICON[statusKey]);
+					const icon = theme.fg(DISPLAY_STATUS_COLOR[statusKey], DISPLAY_STATUS_ICON[statusKey]);
 					const nameStr = theme.bold(theme.fg("accent", formatMemberDisplayName(style, sessionName)));
-					const status = theme.fg(STATUS_COLOR[statusKey], statusKey);
+					const status = theme.fg(DISPLAY_STATUS_COLOR[statusKey], statusKey);
+					const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+					const elapsedLabel = elapsed ? ` ${theme.fg("dim", elapsed)}` : "";
 					const tokens = theme.fg("dim", `${formatTokens(activity.totalTokens)} tokens`);
 					const taskLabel = activeTask
 						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("dim", `#${String(activeTask.id)} ${activeTask.subject}`)}`
@@ -553,7 +584,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const sessionBadgeStr = sessionBadges.length > 0
 						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("muted", sessionBadges.join(" \u00b7 "))}`
 						: "";
-					lines.push(truncateToWidth(` ${icon} ${nameStr} \u2014 ${status} \u00b7 ${tokens}${sessionBadgeStr}${taskLabel}`, width));
+					lines.push(truncateToWidth(` ${icon} ${nameStr} \u2014 ${status}${elapsedLabel} \u00b7 ${tokens}${sessionBadgeStr}${taskLabel}`, width));
 					const attachBanner = renderAttachBanner(width);
 					if (attachBanner) lines.push(attachBanner);
 					lines.push(truncateToWidth(` ${sep}`, width));

@@ -151,6 +151,7 @@ Or let the model drive it with the delegate tool:
 | `message_broadcast` | `message` | Send mailbox message to all discovered workers. Set `urgent=true` to interrupt active turns. |
 | `message_steer` | `name`, `message` | Send steer instruction to a running RPC teammate. |
 | `member_spawn` | `name` | Spawn one teammate (supports context/workspace/model/thinking/plan options). |
+| `member_status` | optional `name` | Real-time worker status: activity, time in state, stall detection, tool use, tokens, last message. Omit name for all-worker summary. |
 | `member_shutdown` | `name` or `all=true` | Request graceful shutdown via mailbox handshake. |
 | `member_kill` | `name` | Force-stop one RPC teammate and unassign active tasks. |
 | `member_prune` | _(none)_ | Mark stale non-RPC workers offline (`all=true` to force). |
@@ -236,6 +237,18 @@ summary below the header:
 These values reflect the same resolution as the `hooks_policy_get` and `model_policy_get`
 tool actions, but are continuously visible — no extra tool calls needed.
 
+### Ergonomic worker status
+
+The widget and panel show real-time worker state at a glance:
+
+- **Time in state**: how long a worker has been in its current status (e.g. `3m12s`)
+- **Stall detection**: when a streaming worker hasn't emitted any agent event for > 5 minutes, status changes to `⚠ stalled` (configurable via `PI_TEAMS_STALL_THRESHOLD_MS`)
+- **Last message summary**: most recent assistant text (first 80–100 chars) visible in the panel's selected-worker detail section
+- **Model per worker**: shown in the panel detail view when available
+- **Current activity**: tool verb (e.g. `running…`, `editing…`) displayed inline
+
+The `member_status` tool action provides the same information programmatically for agent-driven orchestration — no need to parse JSONL files or check file modification times.
+
 ### Panel shortcuts (`/tw` / `/team panel`)
 
 - `↑/↓` or `w/s`: select teammate / scroll transcript
@@ -277,6 +290,7 @@ tool actions, but are continuously visible — no extra tool calls needed.
 | `PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK` | Reopen cap per task when failure action includes `reopen` (`0` disables auto-reopen) | `3` |
 | `PI_TEAMS_HOOKS_FOLLOWUP_OWNER` | Follow-up owner policy: `member`, `lead`, `none` | `member` |
 | `PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE` | Legacy shortcut for `PI_TEAMS_HOOKS_FAILURE_ACTION=followup` | `0` (off) |
+| `PI_TEAMS_STALL_THRESHOLD_MS` | Threshold (ms) before a streaming worker with no events is flagged as "stalled" | `300000` (5 min) |
 
 ## Storage layout
 

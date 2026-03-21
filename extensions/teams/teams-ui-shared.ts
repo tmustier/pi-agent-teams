@@ -59,9 +59,80 @@ export function padRight(str: string, targetWidth: number): string {
 	return w >= targetWidth ? str : str + " ".repeat(targetWidth - w);
 }
 
+/** Display-only status that extends TeammateStatus with a "stalled" state. */
+export type DisplayStatus = TeammateStatus | "stalled";
+
+export const DISPLAY_STATUS_ICON: Record<DisplayStatus, string> = {
+	...STATUS_ICON,
+	stalled: "\u26a0",
+};
+
+export const DISPLAY_STATUS_COLOR: Record<DisplayStatus, ThemeColor> = {
+	...STATUS_COLOR,
+	stalled: "warning",
+};
+
+/**
+ * Default stall threshold in milliseconds.
+ * Configurable via PI_TEAMS_STALL_THRESHOLD_MS env var.
+ */
+function getStallThresholdMs(): number {
+	const envVal = process.env.PI_TEAMS_STALL_THRESHOLD_MS;
+	if (envVal) {
+		const parsed = Number.parseInt(envVal, 10);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	}
+	return 5 * 60 * 1000; // 5 minutes default
+}
+
+/**
+ * Resolve the display status for a teammate, including stall detection.
+ *
+ * A teammate is "stalled" when:
+ * - It has an active RPC connection
+ * - Its transport status is "streaming" (i.e. not idle/stopped/error)
+ * - No agent event has been received for > stallThresholdMs
+ */
+export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): DisplayStatus {
+	if (!rpc) return cfg?.status === "online" ? "idle" : "stopped";
+
+	if (rpc.status === "streaming") {
+		const elapsed = Date.now() - rpc.lastEventAt;
+		if (elapsed > getStallThresholdMs()) return "stalled";
+	}
+	return rpc.status;
+}
+
 export function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
 	if (rpc) return rpc.status;
 	return cfg?.status === "online" ? "idle" : "stopped";
+}
+
+/**
+ * Format elapsed duration as a compact human-readable string.
+ * e.g. "2s", "45s", "3m12s", "1h5m"
+ */
+export function formatElapsed(ms: number): string {
+	const totalSec = Math.floor(ms / 1000);
+	if (totalSec < 60) return `${totalSec}s`;
+	const minutes = Math.floor(totalSec / 60);
+	const seconds = totalSec % 60;
+	if (minutes < 60) return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	const remainingMin = minutes % 60;
+	return remainingMin > 0 ? `${hours}h${remainingMin}m` : `${hours}h`;
+}
+
+/**
+ * Get a compact summary of the last assistant text (first 100 visible chars).
+ */
+export function lastMessageSummary(rpc: TeammateRpc | undefined, maxLen: number = 100): string {
+	if (!rpc) return "";
+	const raw = rpc.lastAssistantText;
+	if (!raw) return "";
+	const compact = raw.replace(/\s+/g, " ").trim();
+	if (!compact) return "";
+	return compact.length > maxLen ? `${compact.slice(0, maxLen - 1)}…` : compact;
 }
 
 export function formatTokens(n: number): string {

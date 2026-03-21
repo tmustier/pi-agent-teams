@@ -4,6 +4,7 @@ import {
 	handleTeamEnvCommand,
 	handleTeamIdCommand,
 	handleTeamListCommand,
+	handleTeamStatusCommand,
 } from "./leader-info-commands.js";
 import { handleTeamAttachCommand, handleTeamDetachCommand } from "./leader-attach-commands.js";
 import {
@@ -30,6 +31,7 @@ import type { SpawnTeammateFn } from "./spawn-types.js";
 import type { TeamConfig } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
+import type { ActivityTracker } from "./activity-tracker.js";
 import type { TeamsStyle } from "./teams-style.js";
 
 const TEAM_HELP_TEXT = [
@@ -40,6 +42,7 @@ const TEAM_HELP_TEXT = [
 	"  /team attach <teamId> [--claim]",
 	"  /team detach",
 	"  /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]",
+	"  /team status [name]  # real-time worker state (stall detection, time in state, activity)",
 	"  /team panel",
 	"  /team send <name> <msg...>",
 	"  /team dm <name> [--urgent] <msg...>",
@@ -81,6 +84,7 @@ export async function handleTeamCommand(opts: {
 	ctx: ExtensionCommandContext;
 	teammates: Map<string, TeammateRpc>;
 	getTeamConfig: () => TeamConfig | null;
+	getTracker: () => ActivityTracker;
 	getTasks: () => TeamTask[];
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
@@ -107,6 +111,7 @@ export async function handleTeamCommand(opts: {
 		ctx,
 		teammates,
 		getTeamConfig,
+		getTracker,
 		getTasks,
 		refreshTasks,
 		renderWidget,
@@ -148,6 +153,7 @@ export async function handleTeamCommand(opts: {
 				ctx,
 				teammates,
 				getTeamConfig,
+				getTracker,
 				style,
 				refreshTasks,
 				renderWidget,
@@ -284,6 +290,19 @@ export async function handleTeamCommand(opts: {
 
 		spawn: async () => {
 			await handleTeamSpawnCommand({ ctx, rest, teammates, style, spawnTeammate });
+		},
+
+		status: async () => {
+			await handleTeamStatusCommand({
+				ctx,
+				rest,
+				teammates,
+				getTeamConfig,
+				getTracker,
+				teamId: activeTeamId,
+				taskListId,
+				style,
+			});
 		},
 
 		style: async () => {

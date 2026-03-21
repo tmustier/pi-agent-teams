@@ -51,7 +51,7 @@ import {
 	releaseTeamAttachClaim,
 } from "../extensions/teams/team-attach-claim.js";
 import { getTeamHelpText } from "../extensions/teams/leader-team-command.js";
-import { isTeamDone } from "../extensions/teams/teams-ui-shared.js";
+import { isTeamDone, formatElapsed, lastMessageSummary } from "../extensions/teams/teams-ui-shared.js";
 import {
 	TEAM_MAILBOX_NS,
 	isIdleNotification,
@@ -919,8 +919,32 @@ console.log("\n12. isTeamDone");
 	);
 }
 
-// ── 13. docs/help drift guard ────────────────────────────────────────
-console.log("\n13. docs/help drift guard");
+// ── 13. formatElapsed + lastMessageSummary ───────────────────────────
+console.log("\n13. formatElapsed + lastMessageSummary");
+{
+	assert(formatElapsed(500) === "0s", "formatElapsed <1s rounds to 0s");
+	assert(formatElapsed(1000) === "1s", "formatElapsed 1s");
+	assert(formatElapsed(45000) === "45s", "formatElapsed 45s");
+	assert(formatElapsed(90000) === "1m30s", "formatElapsed 1m30s");
+	assert(formatElapsed(120000) === "2m", "formatElapsed 2m exact");
+	assert(formatElapsed(3600000) === "1h", "formatElapsed 1h exact");
+	assert(formatElapsed(3660000) === "1h1m", "formatElapsed 1h1m");
+
+	// lastMessageSummary with undefined rpc
+	assert(lastMessageSummary(undefined) === "", "lastMessageSummary(undefined) is empty");
+
+	// lastMessageSummary with mock rpc-like object (only lastAssistantText matters)
+	const mockRpc = { lastAssistantText: "Hello world, this is a test" } as unknown as import("../extensions/teams/teammate-rpc.js").TeammateRpc;
+	const summary = lastMessageSummary(mockRpc, 20);
+	assert(summary.length <= 20, "lastMessageSummary respects maxLen");
+	assert(summary.endsWith("…"), "lastMessageSummary truncates with ellipsis");
+
+	const shortRpc = { lastAssistantText: "Short" } as unknown as import("../extensions/teams/teammate-rpc.js").TeammateRpc;
+	assert(lastMessageSummary(shortRpc, 20) === "Short", "lastMessageSummary keeps short text intact");
+}
+
+// ── 14. docs/help drift guard ────────────────────────────────────────
+console.log("\n14. docs/help drift guard");
 {
 	const help = getTeamHelpText();
 	assert(help.includes("/team done"), "help mentions /team done");
@@ -930,6 +954,7 @@ console.log("\n13. docs/help drift guard");
 	assert(help.includes("/team detach"), "help mentions /team detach");
 	assert(help.includes("[--urgent]"), "help mentions --urgent flag");
 	assert(help.includes("/team gc"), "help mentions /team gc");
+	assert(help.includes("/team status"), "help mentions /team status");
 
 	const readmePath = path.join(process.cwd(), "README.md");
 	if (!fs.existsSync(readmePath)) {
@@ -964,6 +989,10 @@ console.log("\n13. docs/help drift guard");
 		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
+		assert(readme.includes("member_status"), "README mentions teams tool member_status action");
+		assert(readme.includes("PI_TEAMS_STALL_THRESHOLD_MS"), "README mentions stall threshold env var");
+		assert(readme.includes("Stall detection"), "README mentions stall detection feature");
+		assert(readme.includes("Time in state"), "README mentions time-in-state feature");
 	}
 
 	const skillPath = path.join(process.cwd(), "skills/agent-teams/SKILL.md");
