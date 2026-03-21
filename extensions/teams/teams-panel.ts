@@ -10,9 +10,12 @@ import {
 	STATUS_COLOR,
 	STATUS_ICON,
 	formatTokens,
+	getMemberModel,
+	getMemberThinking,
 	getVisibleWorkerNames,
 	padRight,
 	resolveStatus,
+	shortModelLabel,
 	toolActivity,
 	toolVerb,
 } from "./teams-ui-shared.js";
@@ -59,6 +62,12 @@ interface Row {
 	tokensStr: string;
 	activityText: string;
 	isChairman: boolean;
+	/** Short model label (e.g. "claude-sonnet-4-5") or null. */
+	modelLabel: string | null;
+	/** Thinking level (e.g. "high") or null. */
+	thinkingLabel: string | null;
+	/** Active task subject (if any). */
+	activeTaskSubject: string | null;
 }
 
 type WidgetMode = "overview" | "session" | "dm" | "tasks" | "reassign";
@@ -299,6 +308,9 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							activityText: "",
 							isChairman: true,
 							name: leadName,
+							modelLabel: null,
+							thinkingLabel: null,
+							activeTaskSubject: null,
 						});
 					}
 
@@ -310,6 +322,9 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						const statusKey = resolveStatus(rpc, cfg);
 						const activity = tracker.get(name);
 						const owned = tasks.filter((t) => t.owner === name);
+						const activeTask = owned.find((t) => t.status === "in_progress");
+						const memberModel = getMemberModel(cfg);
+						const memberThinking = getMemberThinking(cfg);
 
 						rows.push({
 							icon: STATUS_ICON[statusKey],
@@ -322,6 +337,9 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							activityText: toolActivity(activity.currentToolName),
 							isChairman: false,
 							name,
+							modelLabel: memberModel ? shortModelLabel(memberModel) : null,
+							thinkingLabel: memberThinking,
+							activeTaskSubject: activeTask ? `#${String(activeTask.id)} ${activeTask.subject}` : null,
 						});
 					}
 
@@ -396,9 +414,19 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							const actLabel = r.activityText
 								? "  " + theme.fg("warning", r.activityText)
 								: "";
+							// Model + thinking badge (compact)
+							const badges: string[] = [];
+							if (r.modelLabel) badges.push(r.modelLabel);
+							if (r.thinkingLabel && r.thinkingLabel !== "off") badges.push(`t:${r.thinkingLabel}`);
+							const badgeStr = badges.length > 0 ? "  " + theme.fg("muted", badges.join(" \u00b7 ")) : "";
 
-							const row = `${pointer}${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${cols}${actLabel}`;
+							const row = `${pointer}${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${cols}${actLabel}${badgeStr}`;
 							lines.push(truncateToWidth(row, width));
+							// Active task on second line (indented, only when actively working)
+							if (r.activeTaskSubject) {
+								const taskLine = `  ${theme.fg("dim", "\u2514")} ${theme.fg("warning", r.activeTaskSubject)}`;
+								lines.push(truncateToWidth(taskLine, width));
+							}
 						}
 
 						// Separator + Total
@@ -495,7 +523,16 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					const taskLabel = activeTask
 						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("dim", `#${String(activeTask.id)} ${activeTask.subject}`)}`
 						: "";
-					lines.push(truncateToWidth(` ${icon} ${nameStr} \u2014 ${status} \u00b7 ${tokens}${taskLabel}`, width));
+					// Model + thinking badges in header
+					const memberModel = getMemberModel(cfg);
+					const memberThinking = getMemberThinking(cfg);
+					const sessionBadges: string[] = [];
+					if (memberModel) sessionBadges.push(shortModelLabel(memberModel));
+					if (memberThinking && memberThinking !== "off") sessionBadges.push(`t:${memberThinking}`);
+					const sessionBadgeStr = sessionBadges.length > 0
+						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("muted", sessionBadges.join(" \u00b7 "))}`
+						: "";
+					lines.push(truncateToWidth(` ${icon} ${nameStr} \u2014 ${status} \u00b7 ${tokens}${sessionBadgeStr}${taskLabel}`, width));
 					const attachBanner = renderAttachBanner(width);
 					if (attachBanner) lines.push(attachBanner);
 					lines.push(truncateToWidth(` ${sep}`, width));

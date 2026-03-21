@@ -598,7 +598,17 @@ export function runLeader(pi: ExtensionAPI): void {
 		await refreshTasks();
 		renderWidget();
 
-		return { ok: true, name, mode, workspaceMode, childCwd, note, warnings };
+		return {
+			ok: true,
+			name,
+			mode,
+			workspaceMode,
+			childCwd,
+			note,
+			model: childModel ?? undefined,
+			thinking: thinkingLevel,
+			warnings,
+		};
 	};
 
 	const pollLeaderInbox = async () => {

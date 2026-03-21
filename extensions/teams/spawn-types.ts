@@ -29,6 +29,10 @@ export type SpawnTeammateResult =
 			workspaceMode: WorkspaceMode;
 			childCwd?: string;
 			note?: string;
+			/** The resolved model string (provider/modelId or modelId), if any. */
+			model?: string;
+			/** The effective thinking level for this teammate. */
+			thinking?: ThinkingLevel;
 			warnings: string[];
 	  }
 	| { ok: false; error: string };

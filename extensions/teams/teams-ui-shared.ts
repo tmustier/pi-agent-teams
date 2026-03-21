@@ -60,6 +60,46 @@ export function formatTokens(n: number): string {
 }
 
 /**
+ * Extract the model label from a TeamMember's freeform metadata.
+ *
+ * Stored as `meta.model` (e.g. "anthropic/claude-sonnet-4-5-20250514").
+ * Returns a short display form: strips the provider prefix and long date
+ * suffixes to keep the widget compact.
+ */
+export function getMemberModel(member: TeamMember | undefined): string | null {
+	const raw = member?.meta?.["model"];
+	if (typeof raw !== "string" || !raw) return null;
+	return raw;
+}
+
+/**
+ * Shorten a full model identifier for display in compact UI contexts.
+ *
+ * Examples:
+ * - "anthropic/claude-sonnet-4-5-20250514" → "claude-sonnet-4-5"
+ * - "openai-codex/gpt-5.1-codex-mini" → "gpt-5.1-codex-mini"
+ * - "claude-sonnet-4-5-20250514" → "claude-sonnet-4-5"
+ */
+export function shortModelLabel(fullModel: string): string {
+	// Strip provider prefix (everything before and including the first "/")
+	const slashIdx = fullModel.indexOf("/");
+	const modelId = slashIdx >= 0 ? fullModel.slice(slashIdx + 1) : fullModel;
+	// Strip trailing date suffixes like -20250514 or -20250514-v2
+	return modelId.replace(/-\d{8}(-\w+)?$/, "");
+}
+
+/**
+ * Extract the thinking level from a TeamMember's freeform metadata.
+ *
+ * Stored as `meta.thinkingLevel` (e.g. "high", "medium", "off").
+ */
+export function getMemberThinking(member: TeamMember | undefined): string | null {
+	const raw = member?.meta?.["thinkingLevel"];
+	if (typeof raw !== "string" || !raw) return null;
+	return raw;
+}
+
+/**
  * Compute the set of worker names that should be visible in the UI.
  *
  * Rule: show any worker that is:
