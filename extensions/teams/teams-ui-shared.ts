@@ -1,8 +1,19 @@
-import type { ThemeColor } from "@mariozechner/pi-coding-agent";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
+import {
+	areTeamsHooksEnabled,
+	getTeamsHookFailureAction,
+	getTeamsHookFollowupOwnerPolicy,
+	getTeamsHookMaxReopensPerTask,
+} from "./hooks.js";
+import {
+	formatProviderModel,
+	isDeprecatedTeammateModelId,
+	resolveTeammateModelSelection,
+} from "./model-policy.js";
 
 // Status icon and color mapping (shared by widget + interactive panel)
 export const STATUS_ICON: Record<TeammateStatus, string> = {
@@ -126,4 +137,67 @@ export function getVisibleWorkerNames(opts: {
 	}
 
 	return Array.from(names).sort();
+}
+
+// ── Policy summary (shared by widget + interactive panel) ──
+
+export interface LeaderModelInfo {
+	provider: string | undefined;
+	modelId: string | undefined;
+}
+
+/**
+ * Render a compact policy summary line for the Teams UI.
+ *
+ * Shows hook policy (failureAction, maxReopens, followupOwner) and model
+ * policy (leader model, deprecation, teammate source) as a single dim line.
+ */
+export function renderPolicySummary(opts: {
+	teamConfig: TeamConfig | null;
+	leaderModel: LeaderModelInfo | null;
+	theme: Theme;
+	width: number;
+}): string[] {
+	const { teamConfig, leaderModel, theme, width } = opts;
+	if (!teamConfig) return [];
+
+	const lines: string[] = [];
+
+	// ── Hooks policy ──
+	const hooksEnabled = areTeamsHooksEnabled();
+	const hooksCfg = teamConfig.hooks;
+	const failureAction = getTeamsHookFailureAction(process.env, hooksCfg?.failureAction);
+	const maxReopens = getTeamsHookMaxReopensPerTask(process.env, hooksCfg?.maxReopensPerTask);
+	const followupOwner = getTeamsHookFollowupOwnerPolicy(process.env, hooksCfg?.followupOwner);
+
+	const hooksLabel = hooksEnabled ? "on" : "off";
+	const hooksColor: ThemeColor = hooksEnabled ? "success" : "dim";
+	const hookLine =
+		` ${theme.fg("dim", "hooks:")} ${theme.fg(hooksColor, hooksLabel)}` +
+		(hooksEnabled
+			? theme.fg("dim", ` · failure=${failureAction} · reopens=${String(maxReopens)} · owner=${followupOwner}`)
+			: "");
+	lines.push(truncateToWidth(hookLine, width));
+
+	// ── Model policy ──
+	const leaderProvider = leaderModel?.provider;
+	const leaderModelId = leaderModel?.modelId;
+	const leaderDisplay = formatProviderModel(leaderProvider, leaderModelId) ?? "(unknown)";
+	const deprecated = leaderModelId ? isDeprecatedTeammateModelId(leaderModelId) : false;
+	const resolved = resolveTeammateModelSelection({ leaderProvider, leaderModelId });
+	let teammateSource = "(default)";
+	if (resolved.ok) {
+		const src = resolved.value.source;
+		const resolvedModel = formatProviderModel(resolved.value.provider, resolved.value.modelId);
+		teammateSource = src === "inherit_leader" ? "inherit" : src;
+		if (resolvedModel) teammateSource += `:${resolvedModel}`;
+	}
+
+	const deprecTag = deprecated ? theme.fg("warning", " [deprecated]") : "";
+	const modelLine =
+		` ${theme.fg("dim", "model:")} ${theme.fg("muted", leaderDisplay)}${deprecTag}` +
+		theme.fg("dim", ` · teammate=${teammateSource}`);
+	lines.push(truncateToWidth(modelLine, width));
+
+	return lines;
 }

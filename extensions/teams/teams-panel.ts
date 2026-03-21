@@ -14,11 +14,13 @@ import {
 	getMemberThinking,
 	getVisibleWorkerNames,
 	padRight,
+	renderPolicySummary,
 	resolveStatus,
 	shortModelLabel,
 	toolActivity,
 	toolVerb,
 } from "./teams-ui-shared.js";
+import type { LeaderModelInfo } from "./teams-ui-shared.js";
 
 export interface InteractiveWidgetDeps {
 	getTeammates(): Map<string, TeammateRpc>;
@@ -36,6 +38,7 @@ export interface InteractiveWidgetDeps {
 	assignTask(taskId: string, ownerName: string): Promise<boolean>;
 	getActiveTeamId(): string | null;
 	getSessionTeamId(): string | null;
+	getLeaderModel(): LeaderModelInfo | null;
 	suppressWidget(): void;
 	restoreWidget(): void;
 }
@@ -365,6 +368,15 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					lines.push(truncateToWidth(header, width));
 					const attachBanner = renderAttachBanner(width);
 					if (attachBanner) lines.push(attachBanner);
+
+					// ── Policy summary ──
+					const policyLines = renderPolicySummary({
+						teamConfig: deps.getTeamConfig(),
+						leaderModel: deps.getLeaderModel(),
+						theme,
+						width,
+					});
+					for (const pl of policyLines) lines.push(pl);
 
 					if (rows.length === 0) {
 						lines.push(
