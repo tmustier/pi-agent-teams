@@ -4,6 +4,12 @@ import { spawn } from "node:child_process";
 import { getTeamsHooksDir } from "./paths.js";
 import type { TeamTask } from "./task-store.js";
 
+/**
+ * Hook contract version. Increment on breaking changes only.
+ * See docs/hook-contract.md for the full compatibility policy.
+ */
+export const HOOK_CONTRACT_VERSION = 1;
+
 export type TeamsHookEvent = "idle" | "task_completed" | "task_failed";
 
 export type TeamsHookInvocation = {
@@ -17,6 +23,32 @@ export type TeamsHookInvocation = {
 	completedTask?: TeamTask | null;
 };
 
+/** Structured context payload passed to hooks via PI_TEAMS_HOOK_CONTEXT_JSON. */
+export interface HookContextPayload {
+	version: typeof HOOK_CONTRACT_VERSION;
+	event: TeamsHookEvent;
+	team: {
+		id: string;
+		dir: string;
+		taskListId: string;
+		style: string;
+	};
+	member: string | null;
+	timestamp: string | null;
+	task: {
+		id: string;
+		subject: string;
+		description: string;
+		owner: string | null;
+		status: string;
+		blockedBy: string[];
+		blocks: string[];
+		metadata: Record<string, unknown>;
+		createdAt: string;
+		updatedAt: string;
+	} | null;
+}
+
 export type TeamsHookRunResult = {
 	ran: boolean;
 	hookPath?: string;
@@ -27,6 +59,8 @@ export type TeamsHookRunResult = {
 	stdout: string;
 	stderr: string;
 	error?: string;
+	/** The contract version used for this invocation. */
+	contractVersion: typeof HOOK_CONTRACT_VERSION;
 };
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
@@ -126,10 +160,10 @@ function truncateField(value: string, max: number): string {
 	return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
-function getHookContextJson(invocation: TeamsHookInvocation): string {
+export function buildHookContextPayload(invocation: TeamsHookInvocation): HookContextPayload {
 	const task = invocation.completedTask;
-	const payload = {
-		version: 1,
+	return {
+		version: HOOK_CONTRACT_VERSION,
 		event: invocation.event,
 		team: {
 			id: invocation.teamId,
@@ -154,7 +188,10 @@ function getHookContextJson(invocation: TeamsHookInvocation): string {
 			}
 			: null,
 	};
-	return JSON.stringify(payload);
+}
+
+function getHookContextJson(invocation: TeamsHookInvocation): string {
+	return JSON.stringify(buildHookContextPayload(invocation));
 }
 
 export function getHookBaseName(event: TeamsHookEvent): string {
@@ -280,6 +317,7 @@ export async function runTeamsHook(opts: {
 			durationMs: 0,
 			stdout: "",
 			stderr: "",
+			contractVersion: HOOK_CONTRACT_VERSION,
 		};
 	}
 
@@ -293,6 +331,7 @@ export async function runTeamsHook(opts: {
 			durationMs: 0,
 			stdout: "",
 			stderr: "",
+			contractVersion: HOOK_CONTRACT_VERSION,
 		};
 	}
 
@@ -302,7 +341,7 @@ export async function runTeamsHook(opts: {
 	const baseEnv: NodeJS.ProcessEnv = {
 		...env,
 		PI_TEAMS_HOOK_EVENT: opts.invocation.event,
-		PI_TEAMS_HOOK_CONTEXT_VERSION: "1",
+		PI_TEAMS_HOOK_CONTEXT_VERSION: String(HOOK_CONTRACT_VERSION),
 		PI_TEAMS_HOOK_CONTEXT_JSON: getHookContextJson(opts.invocation),
 		PI_TEAMS_TEAM_ID: opts.invocation.teamId,
 		PI_TEAMS_TEAM_DIR: opts.invocation.teamDir,
@@ -336,6 +375,7 @@ export async function runTeamsHook(opts: {
 			stdout: "",
 			stderr: "",
 			error: msg,
+			contractVersion: HOOK_CONTRACT_VERSION,
 		};
 	}
 
@@ -349,6 +389,7 @@ export async function runTeamsHook(opts: {
 		stdout: res.stdout,
 		stderr: res.stderr,
 		error: res.error,
+		contractVersion: HOOK_CONTRACT_VERSION,
 	};
 }
 
