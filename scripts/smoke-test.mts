@@ -35,6 +35,8 @@ import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelS
 import { getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
+	HOOK_CONTRACT_VERSION,
+	buildHookContextPayload,
 	getTeamsHookFailureAction,
 	getTeamsHookFollowupOwnerPolicy,
 	getTeamsHookMaxReopensPerTask,
@@ -661,6 +663,7 @@ console.log("\n9. teams-hooks (quality gates)");
 
 	assert(res.ran === true, "runs on_task_completed hook");
 	assert(res.exitCode === 0, "hook exit code is 0");
+	assertEq(res.contractVersion, HOOK_CONTRACT_VERSION, "result includes contract version");
 	assert(fs.existsSync(outFile), "hook wrote output file");
 	const hookOutRaw = fs.readFileSync(outFile, "utf8").trim();
 	const hookOut = JSON.parse(hookOutRaw) as {
@@ -704,6 +707,67 @@ console.log("\n9. teams-hooks (quality gates)");
 	assertEq(resolveTeamsHookFollowupOwner({ policy: "none", memberName: "agent1", leadName: "team-lead" }), undefined, "none policy clears follow-up owner");
 	assertEq(getTeamsHookMaxReopensPerTask({}), 3, "hook max reopens default is 3");
 	assertEq(getTeamsHookMaxReopensPerTask({ PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK: "0" }), 0, "hook max reopens supports zero");
+
+	// contract version constant
+	assert(typeof HOOK_CONTRACT_VERSION === "number", "HOOK_CONTRACT_VERSION is a number");
+	assert(HOOK_CONTRACT_VERSION >= 1, "HOOK_CONTRACT_VERSION >= 1");
+	assert(Number.isInteger(HOOK_CONTRACT_VERSION), "HOOK_CONTRACT_VERSION is an integer");
+
+	// buildHookContextPayload produces correct shape
+	const payload = buildHookContextPayload({
+		event: "task_completed",
+		teamId: "test-team",
+		teamDir: "/tmp/test",
+		taskListId: "test-tl",
+		style: "normal",
+		memberName: "agent1",
+		timestamp: "2025-01-01T00:00:00Z",
+		completedTask: {
+			id: "42",
+			subject: "Test subject",
+			description: "Test desc",
+			owner: "agent1",
+			status: "completed",
+			blocks: ["43"],
+			blockedBy: [],
+			metadata: { result: "ok" },
+			createdAt: "2025-01-01T00:00:00Z",
+			updatedAt: "2025-01-01T00:00:00Z",
+		},
+	});
+	assertEq(payload.version, HOOK_CONTRACT_VERSION, "payload version matches constant");
+	assertEq(payload.event, "task_completed", "payload event correct");
+	assertEq(payload.team.id, "test-team", "payload team.id correct");
+	assertEq(payload.member, "agent1", "payload member correct");
+	assertEq(payload.task?.id, "42", "payload task.id correct");
+	assertEq(payload.task?.owner, "agent1", "payload task.owner correct");
+	assertEq(payload.task?.blocks.at(0), "43", "payload task.blocks preserved");
+
+	// null task for idle events
+	const idlePayload = buildHookContextPayload({
+		event: "idle",
+		teamId: "test-team",
+		teamDir: "/tmp/test",
+		taskListId: "test-tl",
+		style: "normal",
+	});
+	assertEq(idlePayload.task, null, "idle payload has null task");
+	assertEq(idlePayload.member, null, "idle payload has null member when not provided");
+
+	// disabled hooks still return contract version
+	const disabledRes = await runTeamsHook({
+		invocation: {
+			event: "idle",
+			teamId: "noop",
+			teamDir: "/tmp/noop",
+			taskListId: "noop",
+			style: "normal",
+		},
+		cwd: tmpRoot,
+		env: { PI_TEAMS_HOOKS_ENABLED: "0" },
+	});
+	assertEq(disabledRes.ran, false, "disabled hooks do not run");
+	assertEq(disabledRes.contractVersion, HOOK_CONTRACT_VERSION, "disabled hooks still report contract version");
 
 	// restore env
 	if (prevRoot === undefined) delete process.env.PI_TEAMS_ROOT_DIR;
@@ -1148,6 +1212,7 @@ console.log("\n15. docs/help drift guard");
 		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
+		assert(readme.includes("docs/hook-contract.md"), "README references hook contract doc");
 		assert(readme.includes("member_status"), "README mentions teams tool member_status action");
 		assert(readme.includes("/team status"), "README mentions /team status command");
 		assert(readme.includes("PI_TEAMS_STALL_THRESHOLD_MS"), "README mentions stall threshold env var");
