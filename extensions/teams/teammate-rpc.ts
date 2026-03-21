@@ -86,6 +86,12 @@ export class TeammateRpc {
 	/** Task currently assigned by the team lead (if any). */
 	currentTaskId: string | null = null;
 
+	/** Epoch ms when the current `status` was entered. */
+	lastStatusChangeAt: number = Date.now();
+
+	/** Epoch ms of the most recent agent event received from the child process. */
+	lastEventAt: number = Date.now();
+
 	private proc: ReturnType<typeof spawn> | null = null;
 	private pending = new Map<string, { resolve: (v: RpcResponse) => void; reject: (e: Error) => void }>();
 	private nextId = 0;
@@ -164,6 +170,9 @@ export class TeammateRpc {
 		// Give the child a moment to boot.
 		await new Promise((r) => setTimeout(r, 120));
 		this.status = "idle";
+		const bootNow = Date.now();
+		this.lastStatusChangeAt = bootNow;
+		this.lastEventAt = bootNow;
 	}
 
 	async stop(): Promise<void> {
@@ -224,12 +233,17 @@ export class TeammateRpc {
 		// Agent event
 		if (!isAgentEvent(obj)) return;
 		const ev = obj;
+		const now = Date.now();
+		this.lastEventAt = now;
+
 		if (ev.type === "agent_start") {
 			this.status = "streaming";
+			this.lastStatusChangeAt = now;
 			this.lastAssistantText = "";
 		}
 		if (ev.type === "agent_end") {
 			this.status = "idle";
+			this.lastStatusChangeAt = now;
 		}
 		if (ev.type === "message_update") {
 			const ame = ev.assistantMessageEvent;

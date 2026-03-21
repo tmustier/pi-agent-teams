@@ -4,8 +4,8 @@ import type { AgentEvent } from "@mariozechner/pi-agent-core";
 
 export type TranscriptEntry =
 	| { kind: "text"; text: string; timestamp: number }
-	| { kind: "tool_start"; toolName: string; timestamp: number }
-	| { kind: "tool_end"; toolName: string; durationMs: number; timestamp: number }
+	| { kind: "tool_start"; toolName: string; content: string | null; timestamp: number }
+	| { kind: "tool_end"; toolName: string; content: string | null; isError: boolean; durationMs: number; timestamp: number }
 	| { kind: "turn_end"; turnNumber: number; tokens: number; timestamp: number };
 
 const MAX_TRANSCRIPT = 200;
@@ -31,6 +31,81 @@ export class TranscriptLog {
 	reset(): void {
 		this.entries = [];
 	}
+}
+
+// ── Tool content extraction ──
+// Extracts a compact, human-readable summary from tool args/results.
+// Budget: ≤120 chars to fit one terminal line minus timestamp prefix.
+
+const MAX_CONTENT_LEN = 120;
+
+function truncateContent(s: string, maxLen: number = MAX_CONTENT_LEN): string {
+	const oneLine = s.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+	if (oneLine.length <= maxLen) return oneLine;
+	return oneLine.slice(0, maxLen - 1) + "\u2026";
+}
+
+/**
+ * Extract a display-friendly summary from tool start args.
+ *
+ * Known tool shapes:
+ *   read  → { path }
+ *   edit  → { path }
+ *   write → { path }
+ *   bash  → { command }
+ *   grep  → { pattern, path? }
+ *   glob  → { pattern }
+ *
+ * Falls back to the first short string value for unknown tools.
+ */
+function extractStartContent(toolName: string, args: unknown): string | null {
+	if (!isRecord(args)) return null;
+	const key = toolName.toLowerCase();
+
+	if (key === "read" || key === "edit" || key === "write") {
+		const p = args.path;
+		return typeof p === "string" ? truncateContent(p) : null;
+	}
+	if (key === "bash") {
+		const cmd = args.command;
+		return typeof cmd === "string" ? truncateContent(cmd) : null;
+	}
+	if (key === "grep") {
+		const pattern = args.pattern;
+		const path = args.path;
+		if (typeof pattern !== "string") return null;
+		const suffix = typeof path === "string" ? ` in ${path}` : "";
+		return truncateContent(`/${pattern}/${suffix}`);
+	}
+	if (key === "glob" || key === "find") {
+		const pattern = args.pattern;
+		return typeof pattern === "string" ? truncateContent(pattern) : null;
+	}
+
+	// Unknown tool: show the first short string arg value (if any).
+	for (const v of Object.values(args)) {
+		if (typeof v === "string" && v.length > 0 && v.length <= MAX_CONTENT_LEN) {
+			return truncateContent(v);
+		}
+	}
+	return null;
+}
+
+/**
+ * Extract a display-friendly summary from tool end result.
+ *
+ * For errors: first line of error text.
+ * For success: null (the tool_end line already shows tool name + duration;
+ * adding full output would be noisy).
+ */
+function extractEndContent(isError: boolean, result: unknown): string | null {
+	if (!isError) return null;
+	if (typeof result === "string") return truncateContent(result);
+	if (isRecord(result)) {
+		const msg = result.error ?? result.message ?? result.stderr ?? result.output;
+		if (typeof msg === "string") return truncateContent(msg);
+	}
+	return null;
 }
 
 export class TranscriptTracker {
@@ -61,7 +136,8 @@ export class TranscriptTracker {
 			const starts = this.toolStarts.get(name) ?? new Map<string, number>();
 			starts.set(ev.toolCallId, now);
 			this.toolStarts.set(name, starts);
-			log.push({ kind: "tool_start", toolName: ev.toolName, timestamp: now });
+			const content = extractStartContent(ev.toolName, ev.args);
+			log.push({ kind: "tool_start", toolName: ev.toolName, content, timestamp: now });
 			return;
 		}
 
@@ -70,7 +146,8 @@ export class TranscriptTracker {
 			const startTs = starts?.get(ev.toolCallId);
 			const durationMs = startTs === undefined ? 0 : now - startTs;
 			starts?.delete(ev.toolCallId);
-			log.push({ kind: "tool_end", toolName: ev.toolName, durationMs, timestamp: now });
+			const content = extractEndContent(ev.isError, ev.result);
+			log.push({ kind: "tool_end", toolName: ev.toolName, content, isError: ev.isError, durationMs, timestamp: now });
 			return;
 		}
 
@@ -152,8 +229,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null;
 }
 
-export type ActivityState = "streaming" | "tool" | "idle";
-
 export interface TeammateActivity {
 	toolUseCount: number;
 	currentToolName: string | null;
@@ -161,18 +236,11 @@ export interface TeammateActivity {
 	turnCount: number;
 	totalTokens: number;
 	recentEvents: Array<{ type: TrackedEventType; toolName?: string; timestamp: number }>;
-	/** Semantic state: streaming text, running a tool, or idle between turns. */
-	currentState: ActivityState;
-	/** When the current state started (ms since epoch). */
-	stateChangedAt: number;
-	/** When the last event of any kind was received (ms since epoch). */
-	lastEventAt: number;
 }
 
 const MAX_RECENT = 10;
 
 function emptyActivity(): TeammateActivity {
-	const now = Date.now();
 	return {
 		toolUseCount: 0,
 		currentToolName: null,
@@ -180,9 +248,6 @@ function emptyActivity(): TeammateActivity {
 		turnCount: 0,
 		totalTokens: 0,
 		recentEvents: [],
-		currentState: "idle",
-		stateChangedAt: now,
-		lastEventAt: now,
 	};
 }
 
@@ -192,11 +257,9 @@ export class ActivityTracker {
 	handleEvent(name: string, ev: AgentEvent): void {
 		const a = this.getOrCreate(name);
 		const now = Date.now();
-		a.lastEventAt = now;
 
 		if (ev.type === "tool_execution_start") {
 			a.currentToolName = ev.toolName;
-			this.transitionState(a, "tool", now);
 			a.recentEvents.push({ type: ev.type, toolName: ev.toolName, timestamp: now });
 			if (a.recentEvents.length > MAX_RECENT) a.recentEvents.shift();
 			return;
@@ -207,7 +270,6 @@ export class ActivityTracker {
 			a.toolUseCount++;
 			a.lastToolName = toolName;
 			a.currentToolName = null;
-			this.transitionState(a, "streaming", now);
 			a.recentEvents.push({ type: ev.type, toolName, timestamp: now });
 			if (a.recentEvents.length > MAX_RECENT) a.recentEvents.shift();
 			return;
@@ -215,7 +277,6 @@ export class ActivityTracker {
 
 		if (ev.type === "agent_end") {
 			a.turnCount++;
-			this.transitionState(a, "idle", now);
 			a.recentEvents.push({ type: ev.type, timestamp: now });
 			if (a.recentEvents.length > MAX_RECENT) a.recentEvents.shift();
 			return;
@@ -228,29 +289,6 @@ export class ActivityTracker {
 			if (!isRecord(usage)) return;
 			const totalTokens = usage.totalTokens;
 			if (typeof totalTokens === "number") a.totalTokens += totalTokens;
-		}
-
-		// agent_start → streaming
-		if (ev.type === "agent_start") {
-			this.transitionState(a, "streaming", now);
-		}
-	}
-
-	/**
-	 * Check whether a worker appears stalled (no events for longer than threshold).
-	 * Returns the number of ms since the last event, or 0 if not stalled.
-	 */
-	stalledMs(name: string, thresholdMs: number): number {
-		const a = this.data.get(name);
-		if (!a) return 0;
-		const elapsed = Date.now() - a.lastEventAt;
-		return elapsed >= thresholdMs ? elapsed : 0;
-	}
-
-	private transitionState(a: TeammateActivity, next: ActivityState, now: number): void {
-		if (a.currentState !== next) {
-			a.currentState = next;
-			a.stateChangedAt = now;
 		}
 	}
 

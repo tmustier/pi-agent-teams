@@ -3,7 +3,6 @@ import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
-import type { ActivityTracker, TeammateActivity } from "./activity-tracker.js";
 import {
 	areTeamsHooksEnabled,
 	getTeamsHookFailureAction,
@@ -60,15 +59,104 @@ export function padRight(str: string, targetWidth: number): string {
 	return w >= targetWidth ? str : str + " ".repeat(targetWidth - w);
 }
 
+/** Display-only status that extends TeammateStatus with a "stalled" state. */
+export type DisplayStatus = TeammateStatus | "stalled";
+
+export const DISPLAY_STATUS_ICON: Record<DisplayStatus, string> = {
+	...STATUS_ICON,
+	stalled: "\u26a0",
+};
+
+export const DISPLAY_STATUS_COLOR: Record<DisplayStatus, ThemeColor> = {
+	...STATUS_COLOR,
+	stalled: "warning",
+};
+
+/**
+ * Default stall threshold in milliseconds.
+ * Configurable via PI_TEAMS_STALL_THRESHOLD_MS env var.
+ */
+function getStallThresholdMs(): number {
+	const envVal = process.env.PI_TEAMS_STALL_THRESHOLD_MS;
+	if (envVal) {
+		const parsed = Number.parseInt(envVal, 10);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	}
+	return 5 * 60 * 1000; // 5 minutes default
+}
+
+/**
+ * Resolve the display status for a teammate, including stall detection.
+ *
+ * A teammate is "stalled" when:
+ * - It has an active RPC connection
+ * - Its transport status is "streaming" (i.e. not idle/stopped/error)
+ * - No agent event has been received for > stallThresholdMs
+ */
+export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): DisplayStatus {
+	if (!rpc) return cfg?.status === "online" ? "idle" : "stopped";
+
+	if (rpc.status === "streaming") {
+		const elapsed = Date.now() - rpc.lastEventAt;
+		if (elapsed > getStallThresholdMs()) return "stalled";
+	}
+	return rpc.status;
+}
+
 export function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
 	if (rpc) return rpc.status;
 	return cfg?.status === "online" ? "idle" : "stopped";
+}
+
+/**
+ * Format elapsed duration as a compact human-readable string.
+ * e.g. "2s", "45s", "3m12s", "1h5m"
+ */
+export function formatElapsed(ms: number): string {
+	const totalSec = Math.floor(ms / 1000);
+	if (totalSec < 60) return `${totalSec}s`;
+	const minutes = Math.floor(totalSec / 60);
+	const seconds = totalSec % 60;
+	if (minutes < 60) return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	const remainingMin = minutes % 60;
+	return remainingMin > 0 ? `${hours}h${remainingMin}m` : `${hours}h`;
+}
+
+/**
+ * Get a compact summary of the last assistant text (first 100 visible chars).
+ */
+export function lastMessageSummary(rpc: TeammateRpc | undefined, maxLen: number = 100): string {
+	if (!rpc) return "";
+	const raw = rpc.lastAssistantText;
+	if (!raw) return "";
+	const compact = raw.replace(/\s+/g, " ").trim();
+	if (!compact) return "";
+	return compact.length > maxLen ? `${compact.slice(0, maxLen - 1)}…` : compact;
 }
 
 export function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
 	return String(n);
+}
+
+/**
+ * Check if all tasks are completed and all teammates are idle/stopped.
+ * Used by the widget (done hint) and leader (auto-done detection).
+ */
+export function isTeamDone(
+	tasks: readonly TeamTask[],
+	teammates: ReadonlyMap<string, TeammateRpc>,
+): boolean {
+	if (tasks.length === 0) return false;
+	const pending = tasks.filter((t) => t.status === "pending").length;
+	const inProgress = tasks.filter((t) => t.status === "in_progress").length;
+	if (pending > 0 || inProgress > 0) return false;
+	for (const [, rpc] of teammates) {
+		if (rpc.status === "streaming" || rpc.status === "starting") return false;
+	}
+	return true;
 }
 
 /**
@@ -201,65 +289,4 @@ export function renderPolicySummary(opts: {
 	lines.push(truncateToWidth(modelLine, width));
 
 	return lines;
-}
-
-/** Color used for stalled workers across all UI surfaces. */
-export const STALLED_COLOR: ThemeColor = "error";
-
-/** Whether a worker should display a stall warning (stalled + not already stopped/error). */
-export function isStallWarning(stalled: boolean, statusKey: TeammateStatus): boolean {
-	return stalled && statusKey !== "stopped" && statusKey !== "error";
-}
-
-/** Resolve the display color for a worker's status icon, accounting for stall state. */
-export function resolveStatusIconColor(stalled: boolean, statusKey: TeammateStatus): ThemeColor {
-	return isStallWarning(stalled, statusKey) ? STALLED_COLOR : STATUS_COLOR[statusKey];
-}
-
-// ── Duration & stall detection ──
-
-/** Default stall threshold: 5 minutes (configurable via PI_TEAMS_STALL_THRESHOLD_MS). */
-export function getStallThresholdMs(): number {
-	const envVal = process.env.PI_TEAMS_STALL_THRESHOLD_MS;
-	if (envVal) {
-		const parsed = Number.parseInt(envVal, 10);
-		if (Number.isFinite(parsed) && parsed > 0) return parsed;
-	}
-	return 5 * 60 * 1000;
-}
-
-/** Format a duration in ms to a compact human-readable string. */
-export function formatDuration(ms: number): string {
-	if (ms < 0) return "0s";
-	const totalSec = Math.floor(ms / 1000);
-	if (totalSec < 60) return `${totalSec}s`;
-	const totalMin = Math.floor(totalSec / 60);
-	const sec = totalSec % 60;
-	if (totalMin < 60) return sec > 0 ? `${totalMin}m ${sec}s` : `${totalMin}m`;
-	const hours = Math.floor(totalMin / 60);
-	const min = totalMin % 60;
-	return min > 0 ? `${hours}h ${min}m` : `${hours}h`;
-}
-
-/** Compute the elapsed time a worker has been in its current state. */
-export function stateElapsedMs(activity: TeammateActivity): number {
-	return Math.max(0, Date.now() - activity.stateChangedAt);
-}
-
-/**
- * Check if a worker looks stalled: no events for longer than threshold,
- * and not in a known idle/stopped state.
- */
-export function isStalled(tracker: ActivityTracker, name: string): boolean {
-	const threshold = getStallThresholdMs();
-	return tracker.stalledMs(name, threshold) > 0;
-}
-
-/** Summarize the last assistant message (first N chars). */
-export function summarizeLastAssistant(rpc: TeammateRpc | undefined, maxLen: number): string | null {
-	if (!rpc) return null;
-	const text = rpc.lastAssistantText.trim();
-	if (!text) return null;
-	const oneLine = text.replace(/\s+/g, " ");
-	return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen - 1)}…` : oneLine;
 }
