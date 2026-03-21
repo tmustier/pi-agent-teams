@@ -32,6 +32,7 @@ import {
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus, updateTeamHooksPolicy } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
 import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelSelection } from "../extensions/teams/model-policy.js";
+import { getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	getTeamsHookFailureAction,
@@ -158,6 +159,38 @@ assert(modelResolvedDeprecatedLeader.ok, "resolveTeammateModelSelection handles 
 if (modelResolvedDeprecatedLeader.ok) {
 	assertEq(modelResolvedDeprecatedLeader.value.source, "default", "deprecated leader model is not inherited");
 	assertEq(formatProviderModel(modelResolvedDeprecatedLeader.value.provider, modelResolvedDeprecatedLeader.value.modelId), null, "deprecated leader fallback has no explicit model");
+}
+
+// ── 1c. UI shared helpers ────────────────────────────────────────────
+console.log("\n1c. teams-ui-shared helpers");
+{
+	// shortModelLabel
+	assertEq(shortModelLabel("anthropic/claude-sonnet-4-5-20250514"), "claude-sonnet-4-5", "shortModelLabel strips provider and date");
+	assertEq(shortModelLabel("openai-codex/gpt-5.1-codex-mini"), "gpt-5.1-codex-mini", "shortModelLabel strips provider, no date");
+	assertEq(shortModelLabel("claude-sonnet-4-5-20250514"), "claude-sonnet-4-5", "shortModelLabel strips date without provider");
+	assertEq(shortModelLabel("claude-opus-4-20250514-v2"), "claude-opus-4", "shortModelLabel strips date with variant suffix");
+	assertEq(shortModelLabel("gpt-5.1-codex-mini"), "gpt-5.1-codex-mini", "shortModelLabel keeps clean model id");
+
+	// getMemberModel
+	assertEq(getMemberModel(undefined), null, "getMemberModel returns null for undefined member");
+	assertEq(
+		getMemberModel({ name: "a", role: "worker", addedAt: "", status: "online" }),
+		null,
+		"getMemberModel returns null when no meta",
+	);
+	assertEq(
+		getMemberModel({ name: "a", role: "worker", addedAt: "", status: "online", meta: { model: "anthropic/claude-sonnet-4-5" } }),
+		"anthropic/claude-sonnet-4-5",
+		"getMemberModel extracts model from meta",
+	);
+
+	// getMemberThinking
+	assertEq(getMemberThinking(undefined), null, "getMemberThinking returns null for undefined member");
+	assertEq(
+		getMemberThinking({ name: "a", role: "worker", addedAt: "", status: "online", meta: { thinkingLevel: "high" } }),
+		"high",
+		"getMemberThinking extracts thinking from meta",
+	);
 }
 
 // ── 2. fs-lock ───────────────────────────────────────────────────────

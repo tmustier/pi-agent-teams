@@ -11,9 +11,12 @@ import {
 	STATUS_COLOR,
 	STATUS_ICON,
 	formatTokens,
+	getMemberModel,
+	getMemberThinking,
 	getVisibleWorkerNames,
 	padRight,
 	resolveStatus,
+	shortModelLabel,
 	toolActivity,
 } from "./teams-ui-shared.js";
 
@@ -39,6 +42,12 @@ interface WidgetRow {
 	completed: number;
 	tokensStr: string; // "—" for chairman
 	activityText: string;
+	/** Short model label (e.g. "claude-sonnet-4-5") or null. */
+	modelLabel: string | null;
+	/** Thinking level (e.g. "high") or null. */
+	thinkingLabel: string | null;
+	/** Active task subject (if any). */
+	activeTaskSubject: string | null;
 }
 
 function shortTeamId(teamId: string): string {
@@ -116,6 +125,9 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						completed: leadTasks.filter((t) => t.status === "completed").length,
 						tokensStr: "\u2014",
 						activityText: "",
+						modelLabel: null,
+						thinkingLabel: null,
+						activeTaskSubject: null,
 					});
 				}
 
@@ -134,6 +146,9 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						const statusKey = resolveStatus(rpc, cfg);
 						const activity = tracker.get(name);
 						const owned = tasks.filter((t) => t.owner === name);
+						const activeTask = owned.find((t) => t.status === "in_progress");
+						const memberModel = getMemberModel(cfg);
+						const memberThinking = getMemberThinking(cfg);
 
 						rows.push({
 							icon: STATUS_ICON[statusKey],
@@ -144,6 +159,9 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 							completed: owned.filter((t) => t.status === "completed").length,
 							tokensStr: formatTokens(activity.totalTokens),
 							activityText: toolActivity(activity.currentToolName),
+							modelLabel: memberModel ? shortModelLabel(memberModel) : null,
+							thinkingLabel: memberThinking,
+							activeTaskSubject: activeTask ? `#${String(activeTask.id)} ${activeTask.subject}` : null,
 						});
 					}
 
@@ -172,9 +190,19 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 							` \u00b7 ${pNum} pending \u00b7 ${cNum} complete \u00b7 ${tokStr} tokens`,
 						);
 						const actLabel = r.activityText ? "  " + theme.fg("warning", r.activityText) : "";
+						// Model + thinking badge (compact)
+						const badges: string[] = [];
+						if (r.modelLabel) badges.push(r.modelLabel);
+						if (r.thinkingLabel && r.thinkingLabel !== "off") badges.push(`t:${r.thinkingLabel}`);
+						const badgeStr = badges.length > 0 ? "  " + theme.fg("muted", badges.join(" \u00b7 ")) : "";
 
-						const row = ` ${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${cols}${actLabel}`;
+						const row = ` ${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${cols}${actLabel}${badgeStr}`;
 						lines.push(truncateToWidth(row, width));
+						// Active task on second line (indented, only when actively working)
+						if (r.activeTaskSubject) {
+							const taskLine = `     ${theme.fg("dim", "\u2514")} ${theme.fg("warning", r.activeTaskSubject)}`;
+							lines.push(truncateToWidth(taskLine, width));
+						}
 					}
 
 					// ── Total row ──

@@ -506,11 +506,22 @@ export function registerTeamsTool(opts: {
 				const lines: string[] = [
 					`Spawned ${formatMemberDisplayName(style, res.name)} (${res.mode}/${res.workspaceMode})`,
 				];
+				if (res.model) lines.push(`model: ${res.model}`);
+				if (res.thinking) lines.push(`thinking: ${res.thinking}`);
 				if (res.note) lines.push(`note: ${res.note}`);
 				for (const w of res.warnings) lines.push(`warning: ${w}`);
 				return {
 					content: [{ type: "text", text: lines.join("\n") }],
-					details: { action, teamId, name: res.name, mode: res.mode, workspaceMode: res.workspaceMode, warnings: res.warnings },
+					details: {
+						action,
+						teamId,
+						name: res.name,
+						mode: res.mode,
+						workspaceMode: res.workspaceMode,
+						model: res.model,
+						thinking: res.thinking,
+						warnings: res.warnings,
+					},
 				};
 			}
 
@@ -1052,6 +1063,8 @@ export function registerTeamsTool(opts: {
 			const lines: string[] = [];
 			if (spawned.length) {
 				lines.push(`Spawned: ${spawned.map((n) => formatMemberDisplayName(style, n)).join(", ")}`);
+				if (spawnModel) lines.push(`model: ${spawnModel}`);
+				if (spawnThinking) lines.push(`thinking: ${spawnThinking}`);
 			}
 			lines.push(`Delegated ${assignments.length} task(s):`);
 			for (const a of assignments) {
