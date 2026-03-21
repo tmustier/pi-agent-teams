@@ -4,11 +4,13 @@ import {
 	handleTeamEnvCommand,
 	handleTeamIdCommand,
 	handleTeamListCommand,
+	handleTeamStatusCommand,
 } from "./leader-info-commands.js";
 import { handleTeamAttachCommand, handleTeamDetachCommand } from "./leader-attach-commands.js";
 import {
 	handleTeamCleanupCommand,
 	handleTeamDelegateCommand,
+	handleTeamDoneCommand,
 	handleTeamGcCommand,
 	handleTeamKillCommand,
 	handleTeamPruneCommand,
@@ -29,6 +31,7 @@ import type { SpawnTeammateFn } from "./spawn-types.js";
 import type { TeamConfig } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
+import type { ActivityTracker } from "./activity-tracker.js";
 import type { TeamsStyle } from "./teams-style.js";
 
 const TEAM_HELP_TEXT = [
@@ -39,6 +42,7 @@ const TEAM_HELP_TEXT = [
 	"  /team attach <teamId> [--claim]",
 	"  /team detach",
 	"  /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]",
+	"  /team status [name]  # real-time worker state (stall detection, time in state, activity)",
 	"  /team panel",
 	"  /team send <name> <msg...>",
 	"  /team dm <name> [--urgent] <msg...>",
@@ -55,6 +59,7 @@ const TEAM_HELP_TEXT = [
 	"  /team style init <name> [extends <base>]",
 	"  /team plan approve <name>",
 	"  /team plan reject <name> [feedback...]",
+	"  /team done [--force]  # end run: stop teammates + hide widget",
 	"  /team cleanup [--force]",
 	"  /team gc [--dry-run] [--force] [--max-age-hours=N]  # remove old team dirs",
 	"  /team prune [--all]  # hide stale manual teammates (mark offline)",
@@ -79,9 +84,12 @@ export async function handleTeamCommand(opts: {
 	ctx: ExtensionCommandContext;
 	teammates: Map<string, TeammateRpc>;
 	getTeamConfig: () => TeamConfig | null;
+	getTracker: () => ActivityTracker;
 	getTasks: () => TeamTask[];
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
+	hideWidget: () => void;
+	restoreWidget: () => void;
 	getTaskListId: () => string | null;
 	setTaskListId: (id: string) => void;
 	getActiveTeamId: () => string;
@@ -103,9 +111,12 @@ export async function handleTeamCommand(opts: {
 		ctx,
 		teammates,
 		getTeamConfig,
+		getTracker,
 		getTasks,
 		refreshTasks,
 		renderWidget,
+		hideWidget,
+		restoreWidget,
 		getTaskListId,
 		setTaskListId,
 		getActiveTeamId,
@@ -142,6 +153,7 @@ export async function handleTeamCommand(opts: {
 				ctx,
 				teammates,
 				getTeamConfig,
+				getTracker,
 				style,
 				refreshTasks,
 				renderWidget,
@@ -183,6 +195,7 @@ export async function handleTeamCommand(opts: {
 				setTaskListId,
 				refreshTasks,
 				renderWidget,
+				restoreWidget,
 			});
 		},
 
@@ -196,6 +209,23 @@ export async function handleTeamCommand(opts: {
 				setTaskListId,
 				refreshTasks,
 				renderWidget,
+				restoreWidget,
+			});
+		},
+
+		done: async () => {
+			await handleTeamDoneCommand({
+				ctx,
+				rest,
+				teamId: activeTeamId,
+				teammates,
+				getTeamConfig,
+				leadName,
+				style,
+				stopAllTeammates,
+				refreshTasks,
+				getTasks,
+				hideWidget,
 			});
 		},
 
@@ -260,6 +290,19 @@ export async function handleTeamCommand(opts: {
 
 		spawn: async () => {
 			await handleTeamSpawnCommand({ ctx, rest, teammates, style, spawnTeammate });
+		},
+
+		status: async () => {
+			await handleTeamStatusCommand({
+				ctx,
+				rest,
+				teammates,
+				getTeamConfig,
+				getTracker,
+				teamId: activeTeamId,
+				taskListId,
+				style,
+			});
 		},
 
 		style: async () => {

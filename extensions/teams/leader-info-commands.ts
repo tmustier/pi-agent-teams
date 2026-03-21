@@ -5,16 +5,20 @@ import type { TeammateRpc } from "./teammate-rpc.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import { resolveDisplayStatus, formatElapsed, formatTokens, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
+import type { ActivityTracker } from "./activity-tracker.js";
+import { listTasks } from "./task-store.js";
 
 export async function handleTeamListCommand(opts: {
 	ctx: ExtensionCommandContext;
 	teammates: Map<string, TeammateRpc>;
 	getTeamConfig: () => TeamConfig | null;
+	getTracker: () => ActivityTracker;
 	style: TeamsStyle;
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
 }): Promise<void> {
-	const { ctx, teammates, getTeamConfig, style, refreshTasks, renderWidget } = opts;
+	const { ctx, teammates, getTeamConfig, getTracker, style, refreshTasks, renderWidget } = opts;
 	const strings = getTeamsStrings(style);
 
 	await refreshTasks();
@@ -34,13 +38,19 @@ export async function handleTeamListCommand(opts: {
 		return;
 	}
 
+	const tracker = getTracker();
 	const lines: string[] = [];
 	for (const name of Array.from(names).sort()) {
 		const rpc = teammates.get(name);
 		const cfg = cfgByName.get(name);
-		const status = rpc ? rpc.status : cfg?.status ?? "offline";
+		const displayStatus = resolveDisplayStatus(rpc, cfg);
 		const kind = rpc ? "rpc" : cfg ? "manual" : "unknown";
-		lines.push(`${formatMemberDisplayName(style, name)}: ${status} (${kind})`);
+		const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+		const activity = tracker.get(name);
+		const tool = toolActivity(activity.currentToolName);
+		const elapsedTag = elapsed ? ` ${elapsed}` : "";
+		const toolTag = tool ? ` (${tool})` : "";
+		lines.push(`${formatMemberDisplayName(style, name)}: ${displayStatus}${elapsedTag}${toolTag} [${kind}]`);
 	}
 
 	ctx.ui.notify(lines.join("\n"), "info");
@@ -137,4 +147,96 @@ export async function handleTeamEnvCommand(opts: {
 		].join("\n"),
 		"info",
 	);
+}
+
+export async function handleTeamStatusCommand(opts: {
+	ctx: ExtensionCommandContext;
+	rest: string[];
+	teammates: Map<string, TeammateRpc>;
+	getTeamConfig: () => TeamConfig | null;
+	getTracker: () => ActivityTracker;
+	teamId: string;
+	taskListId: string | null;
+	style: TeamsStyle;
+}): Promise<void> {
+	const { ctx, rest, teammates, getTeamConfig, getTracker, teamId, taskListId, style } = opts;
+	const strings = getTeamsStrings(style);
+	const tracker = getTracker();
+	const teamConfig = getTeamConfig();
+	const teamDir = getTeamDir(teamId);
+	const effectiveTlId = taskListId ?? teamId;
+
+	const nameRaw = rest[0];
+
+	// If no name, show summary of all workers (same as member_status with no name).
+	if (!nameRaw) {
+		const cfgMembers = teamConfig?.members ?? [];
+		const cfgByName = new Map<string, TeamMember>();
+		for (const m of cfgMembers) cfgByName.set(m.name, m);
+
+		const workerNames = new Set<string>();
+		for (const n of teammates.keys()) workerNames.add(n);
+		for (const m of cfgMembers) {
+			if (m.role === "worker" && m.status === "online") workerNames.add(m.name);
+		}
+
+		if (workerNames.size === 0) {
+			ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s`, "info");
+			return;
+		}
+
+		const lines: string[] = [];
+		for (const n of Array.from(workerNames).sort()) {
+			const rpc = teammates.get(n);
+			const cfg = cfgByName.get(n);
+			const displayStatus = resolveDisplayStatus(rpc, cfg);
+			const activity = tracker.get(n);
+			const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+			const tool = toolActivity(activity.currentToolName);
+			const toolTag = tool ? ` (${tool})` : "";
+			const stalledTag = displayStatus === "stalled" ? " ⚠ STALLED" : "";
+			lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${toolTag} · ${formatTokens(activity.totalTokens)} tokens${stalledTag}`);
+		}
+		ctx.ui.notify(lines.join("\n"), "info");
+		return;
+	}
+
+	// Single worker detail view.
+	const name = sanitizeName(nameRaw);
+	const rpc = teammates.get(name);
+	const memberCfg = (teamConfig?.members ?? []).find((m) => m.name === name);
+	if (!rpc && !memberCfg) {
+		ctx.ui.notify(`Unknown ${strings.memberTitle.toLowerCase()}: ${name}`, "error");
+		return;
+	}
+
+	const displayStatus = resolveDisplayStatus(rpc, memberCfg);
+	const activity = tracker.get(name);
+	const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+	const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
+	const currentTool = toolActivity(activity.currentToolName);
+	const msgPreview = lastMessageSummary(rpc, 120);
+	const allTasks = await listTasks(teamDir, effectiveTlId);
+	const owned = allTasks.filter((t) => t.owner === name);
+	const activeTask = owned.find((t) => t.status === "in_progress");
+	const model = memberCfg?.meta?.["model"];
+	const cwd = memberCfg?.cwd;
+
+	const lines: string[] = [
+		`${formatMemberDisplayName(style, name)}: ${displayStatus}`,
+		`time in state: ${elapsed || "(unknown)"}`,
+		`last event: ${noEventFor || "(unknown)"} ago`,
+		`current activity: ${currentTool || "(none)"}`,
+		`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
+	];
+	if (typeof model === "string" && model) lines.push(`model: ${model}`);
+	if (cwd) lines.push(`cwd: ${cwd}`);
+	if (activeTask) lines.push(`active task: #${activeTask.id} ${activeTask.subject}`);
+	lines.push(`tasks: ${owned.filter((t) => t.status === "pending").length} pending · ${owned.filter((t) => t.status === "in_progress").length} in-progress · ${owned.filter((t) => t.status === "completed").length} completed`);
+	if (msgPreview) lines.push(`last message: ${msgPreview}`);
+	if (displayStatus === "stalled") {
+		lines.push(`⚠ WARNING: no agent events for ${noEventFor} — worker may be stalled`);
+	}
+
+	ctx.ui.notify(lines.join("\n"), "info");
 }

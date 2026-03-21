@@ -20,13 +20,22 @@ npx tsx scripts/smoke-test.mts
 | Module           | Coverage                                                        |
 |------------------|-----------------------------------------------------------------|
 | `names.ts`       | `sanitizeName` character replacement, edge cases                |
-| `fs-lock.ts`     | `withLock` returns value, cleans up lock file                   |
-| `mailbox.ts`     | `writeToMailbox`, `popUnreadMessages`, read-once semantics      |
+| `model-policy.ts`| Deprecated model detection, teammate model selection/override   |
+| `teams-ui-shared.ts` | `isTeamDone` (9 edge cases), display helpers                |
+| `fs-lock.ts`     | `withLock` returns value, cleans up lock file, stale locks      |
+| `mailbox.ts`     | `writeToMailbox`, `popUnreadMessages`, read-once, urgent flag   |
 | `task-store.ts`  | CRUD, `startAssignedTask`, `completeTask`, `claimNextAvailable`,|
 |                  | `unassignTasksForAgent`, dependencies, `clearTasks`             |
-| `team-config.ts` | `ensureTeamConfig` (idempotent), `upsertMember`, `setMemberStatus`, `loadTeamConfig` |
+| `team-config.ts` | `ensureTeamConfig` (idempotent), `upsertMember`, `setMemberStatus`, `loadTeamConfig`, hooks policy |
 | `protocol.ts`    | Structured message parsers (valid + invalid JSON + wrong type)  |
-| Pi CLI           | `pi --version` executes (skipped in CI if `pi` not on PATH)     |
+| `teams-style.ts` | Custom styles, naming rules, pool naming                        |
+| `hooks.ts`       | Hook execution, failure policies, follow-up/reopen actions      |
+| `team-attach-claim.ts` | Acquire/release/heartbeat claims, staleness detection     |
+| `team-discovery.ts` | Team listing, config parsing, online worker counts           |
+| `/team done`     | End-of-run cleanup, force-done with in-progress tasks, idempotency |
+| `isTeamDone`     | All branches: empty, completed, pending, streaming, stopped     |
+| docs drift guard | README, SKILL.md, help text consistency checks                  |
+| Pi CLI           | `pi --version` executes (skipped in CI if `pi` not on PATH)    |
 
 **Expected result:** `PASSED: <n>  FAILED: 0`
 
@@ -95,7 +104,17 @@ Ask the model:
 
 **Expected:** the `teams` tool is invoked, task created and assigned.
 
-### 3g. Shutdown
+### 3g. End of run
+
+```
+/team done
+```
+
+**Expected:** all teammates stopped, widget hidden, summary notification shows task counts. If tasks are still in progress, use `/team done --force`.
+
+After `/team done`, spawning a new teammate should automatically restore the widget.
+
+### 3h. Shutdown (alternative to done)
 
 ```
 /team shutdown agent1
@@ -138,9 +157,9 @@ pi --no-extensions -e extensions/teams/index.ts --mode rpc
 
 | # | Test                          | Method     | Status |
 |---|-------------------------------|------------|--------|
-| 1 | Unit primitives (60 asserts)  | Automated  | ✅     |
+| 1 | Unit primitives (200+ asserts)| Automated  | ✅     |
 | 2 | Extension loading             | CLI        | ✅     |
-| 3 | Interactive spawn/task/dm     | Manual     | 📋     |
+| 3 | Interactive spawn/task/dm/done| Manual     | 📋     |
 | 4 | Worker-side RPC               | Manual     | 📋     |
 
 ✅ = verified in this run, 📋 = documented for manual execution.

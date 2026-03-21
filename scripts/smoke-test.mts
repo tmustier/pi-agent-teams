@@ -32,6 +32,7 @@ import {
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus, updateTeamHooksPolicy } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
 import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelSelection } from "../extensions/teams/model-policy.js";
+import { getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	HOOK_CONTRACT_VERSION,
@@ -52,6 +53,7 @@ import {
 	releaseTeamAttachClaim,
 } from "../extensions/teams/team-attach-claim.js";
 import { getTeamHelpText } from "../extensions/teams/leader-team-command.js";
+import { isTeamDone, formatElapsed, lastMessageSummary } from "../extensions/teams/teams-ui-shared.js";
 import {
 	TEAM_MAILBOX_NS,
 	isIdleNotification,
@@ -160,6 +162,38 @@ assert(modelResolvedDeprecatedLeader.ok, "resolveTeammateModelSelection handles 
 if (modelResolvedDeprecatedLeader.ok) {
 	assertEq(modelResolvedDeprecatedLeader.value.source, "default", "deprecated leader model is not inherited");
 	assertEq(formatProviderModel(modelResolvedDeprecatedLeader.value.provider, modelResolvedDeprecatedLeader.value.modelId), null, "deprecated leader fallback has no explicit model");
+}
+
+// ── 1c. UI shared helpers ────────────────────────────────────────────
+console.log("\n1c. teams-ui-shared helpers");
+{
+	// shortModelLabel
+	assertEq(shortModelLabel("anthropic/claude-sonnet-4-5-20250514"), "claude-sonnet-4-5", "shortModelLabel strips provider and date");
+	assertEq(shortModelLabel("openai-codex/gpt-5.1-codex-mini"), "gpt-5.1-codex-mini", "shortModelLabel strips provider, no date");
+	assertEq(shortModelLabel("claude-sonnet-4-5-20250514"), "claude-sonnet-4-5", "shortModelLabel strips date without provider");
+	assertEq(shortModelLabel("claude-opus-4-20250514-v2"), "claude-opus-4", "shortModelLabel strips date with variant suffix");
+	assertEq(shortModelLabel("gpt-5.1-codex-mini"), "gpt-5.1-codex-mini", "shortModelLabel keeps clean model id");
+
+	// getMemberModel
+	assertEq(getMemberModel(undefined), null, "getMemberModel returns null for undefined member");
+	assertEq(
+		getMemberModel({ name: "a", role: "worker", addedAt: "", status: "online" }),
+		null,
+		"getMemberModel returns null when no meta",
+	);
+	assertEq(
+		getMemberModel({ name: "a", role: "worker", addedAt: "", status: "online", meta: { model: "anthropic/claude-sonnet-4-5" } }),
+		"anthropic/claude-sonnet-4-5",
+		"getMemberModel extracts model from meta",
+	);
+
+	// getMemberThinking
+	assertEq(getMemberThinking(undefined), null, "getMemberThinking returns null for undefined member");
+	assertEq(
+		getMemberThinking({ name: "a", role: "worker", addedAt: "", status: "online", meta: { thinkingLevel: "high" } }),
+		"high",
+		"getMemberThinking extracts thinking from meta",
+	);
 }
 
 // ── 2. fs-lock ───────────────────────────────────────────────────────
@@ -804,22 +838,195 @@ console.log("\n10. team discovery + attach claims");
 	}
 }
 
-// ── 11. docs/help drift guard ────────────────────────────────────────
-console.log("\n11. docs/help drift guard");
+// ── 11. /team done (end-of-run cleanup) ──────────────────────────────
+console.log("\n11. /team done (end-of-run)");
+{
+	const doneDir = path.join(tmpRoot, "done-test");
+	const doneTeamId = "done-team";
+	const doneTeamDir = path.join(doneDir, doneTeamId);
+	const doneTlId = doneTeamId;
+
+	await ensureTeamConfig(doneTeamDir, { teamId: doneTeamId, taskListId: doneTlId, leadName: "team-lead", style: "normal" });
+	await upsertMember(doneTeamDir, { name: "alice", role: "worker", status: "online" });
+	await upsertMember(doneTeamDir, { name: "bob", role: "worker", status: "online" });
+
+	// Create tasks and mark all completed
+	const t1 = await createTask(doneTeamDir, doneTlId, { subject: "Task 1", description: "", owner: "alice" });
+	const t2 = await createTask(doneTeamDir, doneTlId, { subject: "Task 2", description: "", owner: "bob" });
+	await completeTask(doneTeamDir, doneTlId, t1.id, "alice");
+	await completeTask(doneTeamDir, doneTlId, t2.id, "bob");
+
+	const doneTasks = await listTasks(doneTeamDir, doneTlId);
+	const allCompleted = doneTasks.every((t) => t.status === "completed");
+	assert(allCompleted, "/team done precondition: all tasks completed");
+	assertEq(doneTasks.length, 2, "/team done: 2 tasks exist");
+
+	// Mark workers offline (simulating what /team done does)
+	await setMemberStatus(doneTeamDir, "alice", "offline", { meta: { stoppedReason: "team-done" } });
+	await setMemberStatus(doneTeamDir, "bob", "offline", { meta: { stoppedReason: "team-done" } });
+
+	const cfgAfter = await loadTeamConfig(doneTeamDir);
+	const onlineAfter = (cfgAfter?.members ?? []).filter((m) => m.role === "worker" && m.status === "online");
+	assertEq(onlineAfter.length, 0, "/team done: all workers offline after done");
+
+	const offlineAlice = cfgAfter?.members.find((m) => m.name === "alice");
+	assert(offlineAlice?.meta?.["stoppedReason"] === "team-done", "/team done: alice has stoppedReason=team-done");
+
+	// Test force-done with in-progress tasks (simulates --force path)
+	const forceDir = path.join(tmpRoot, "force-done-test");
+	const forceTeamId = "force-done-team";
+	const forceTeamDir = path.join(forceDir, forceTeamId);
+	const forceTlId = forceTeamId;
+
+	await ensureTeamConfig(forceTeamDir, { teamId: forceTeamId, taskListId: forceTlId, leadName: "team-lead", style: "normal" });
+	await upsertMember(forceTeamDir, { name: "carol", role: "worker", status: "online" });
+
+	const ft1 = await createTask(forceTeamDir, forceTlId, { subject: "Ongoing work", description: "", owner: "carol" });
+	await startAssignedTask(forceTeamDir, forceTlId, ft1.id, "carol");
+
+	const forceTasks = await listTasks(forceTeamDir, forceTlId);
+	assertEq(forceTasks[0]?.status, "in_progress", "/team done --force precondition: task in_progress");
+
+	// Simulate force-done: unassign in-progress tasks
+	await unassignTasksForAgent(forceTeamDir, forceTlId, "carol", "team done");
+	await setMemberStatus(forceTeamDir, "carol", "offline", { meta: { stoppedReason: "team-done" } });
+
+	const forceTasksAfter = await listTasks(forceTeamDir, forceTlId);
+	assertEq(forceTasksAfter[0]?.status, "pending", "/team done --force: in-progress task reset to pending");
+	assertEq(forceTasksAfter[0]?.owner, undefined, "/team done --force: in-progress task unassigned");
+
+	const forceCfgAfter = await loadTeamConfig(forceTeamDir);
+	const forceCarol = forceCfgAfter?.members.find((m) => m.name === "carol");
+	assertEq(forceCarol?.status, "offline", "/team done --force: worker offline");
+
+	// Test idempotency: calling done again on already-done team is safe
+	await setMemberStatus(doneTeamDir, "alice", "offline", { meta: { stoppedReason: "team-done" } });
+	await setMemberStatus(doneTeamDir, "bob", "offline", { meta: { stoppedReason: "team-done" } });
+	const idempotentCfg = await loadTeamConfig(doneTeamDir);
+	const idempotentOnline = (idempotentCfg?.members ?? []).filter((m) => m.role === "worker" && m.status === "online");
+	assertEq(idempotentOnline.length, 0, "/team done idempotent: still 0 online after second done");
+	const idempotentTasks = await listTasks(doneTeamDir, doneTlId);
+	const idempotentAllDone = idempotentTasks.every((t) => t.status === "completed");
+	assert(idempotentAllDone, "/team done idempotent: tasks still completed after second done");
+}
+
+// ── 12. isTeamDone (pure function unit tests) ───────────────────────
+console.log("\n12. isTeamDone");
+{
+	// Minimal mock: isTeamDone only reads .status from TeammateRpc values
+	type MockRpc = { status: string };
+	const mockMap = (entries: Array<[string, MockRpc]>) =>
+		new Map(entries) as unknown as ReadonlyMap<string, import("../extensions/teams/teammate-rpc.js").TeammateRpc>;
+
+	const completedTask = (id: string): import("../extensions/teams/task-store.js").TeamTask => ({
+		id, subject: "x", description: "", status: "completed",
+		blocks: [], blockedBy: [], metadata: {}, createdAt: "", updatedAt: "",
+	});
+	const pendingTask = (id: string): import("../extensions/teams/task-store.js").TeamTask => ({
+		id, subject: "x", description: "", status: "pending",
+		blocks: [], blockedBy: [], metadata: {}, createdAt: "", updatedAt: "",
+	});
+	const inProgressTask = (id: string): import("../extensions/teams/task-store.js").TeamTask => ({
+		id, subject: "x", description: "", status: "in_progress",
+		blocks: [], blockedBy: [], metadata: {}, createdAt: "", updatedAt: "",
+	});
+
+	// No tasks → not done
+	assert(!isTeamDone([], mockMap([])), "isTeamDone: empty tasks = false");
+
+	// All completed, no teammates → done
+	assert(isTeamDone([completedTask("1"), completedTask("2")], mockMap([])), "isTeamDone: all completed, no teammates = true");
+
+	// All completed, all idle → done
+	assert(
+		isTeamDone([completedTask("1")], mockMap([["alice", { status: "idle" }]])),
+		"isTeamDone: all completed + idle teammate = true",
+	);
+
+	// All completed, one streaming → not done
+	assert(
+		!isTeamDone([completedTask("1")], mockMap([["alice", { status: "streaming" }]])),
+		"isTeamDone: all completed + streaming teammate = false",
+	);
+
+	// All completed, one starting → not done
+	assert(
+		!isTeamDone([completedTask("1")], mockMap([["alice", { status: "starting" }]])),
+		"isTeamDone: all completed + starting teammate = false",
+	);
+
+	// All completed, stopped teammate → done
+	assert(
+		isTeamDone([completedTask("1")], mockMap([["alice", { status: "stopped" }]])),
+		"isTeamDone: all completed + stopped teammate = true",
+	);
+
+	// Pending task → not done
+	assert(
+		!isTeamDone([completedTask("1"), pendingTask("2")], mockMap([])),
+		"isTeamDone: one pending = false",
+	);
+
+	// In-progress task → not done
+	assert(
+		!isTeamDone([completedTask("1"), inProgressTask("2")], mockMap([])),
+		"isTeamDone: one in-progress = false",
+	);
+
+	// Mixed: all completed, mixed teammate states (idle + stopped) → done
+	assert(
+		isTeamDone(
+			[completedTask("1"), completedTask("2")],
+			mockMap([["alice", { status: "idle" }], ["bob", { status: "stopped" }]]),
+		),
+		"isTeamDone: all completed + idle+stopped = true",
+	);
+}
+
+// ── 13. formatElapsed + lastMessageSummary ───────────────────────────
+console.log("\n13. formatElapsed + lastMessageSummary");
+{
+	assert(formatElapsed(500) === "0s", "formatElapsed <1s rounds to 0s");
+	assert(formatElapsed(1000) === "1s", "formatElapsed 1s");
+	assert(formatElapsed(45000) === "45s", "formatElapsed 45s");
+	assert(formatElapsed(90000) === "1m30s", "formatElapsed 1m30s");
+	assert(formatElapsed(120000) === "2m", "formatElapsed 2m exact");
+	assert(formatElapsed(3600000) === "1h", "formatElapsed 1h exact");
+	assert(formatElapsed(3660000) === "1h1m", "formatElapsed 1h1m");
+
+	// lastMessageSummary with undefined rpc
+	assert(lastMessageSummary(undefined) === "", "lastMessageSummary(undefined) is empty");
+
+	// lastMessageSummary with mock rpc-like object (only lastAssistantText matters)
+	const mockRpc = { lastAssistantText: "Hello world, this is a test" } as unknown as import("../extensions/teams/teammate-rpc.js").TeammateRpc;
+	const summary = lastMessageSummary(mockRpc, 20);
+	assert(summary.length <= 20, "lastMessageSummary respects maxLen");
+	assert(summary.endsWith("…"), "lastMessageSummary truncates with ellipsis");
+
+	const shortRpc = { lastAssistantText: "Short" } as unknown as import("../extensions/teams/teammate-rpc.js").TeammateRpc;
+	assert(lastMessageSummary(shortRpc, 20) === "Short", "lastMessageSummary keeps short text intact");
+}
+
+// ── 14. docs/help drift guard ────────────────────────────────────────
+console.log("\n14. docs/help drift guard");
 {
 	const help = getTeamHelpText();
+	assert(help.includes("/team done"), "help mentions /team done");
 	assert(help.includes("/team style list"), "help mentions /team style list");
 	assert(help.includes("/team style init"), "help mentions /team style init");
 	assert(help.includes("/team attach <teamId> [--claim]"), "help mentions /team attach claim mode");
 	assert(help.includes("/team detach"), "help mentions /team detach");
 	assert(help.includes("[--urgent]"), "help mentions --urgent flag");
 	assert(help.includes("/team gc"), "help mentions /team gc");
+	assert(help.includes("/team status"), "help mentions /team status");
 
 	const readmePath = path.join(process.cwd(), "README.md");
 	if (!fs.existsSync(readmePath)) {
 		console.log("  (skipped) README.md not found");
 	} else {
 		const readme = fs.readFileSync(readmePath, "utf8");
+		assert(readme.includes("/team done"), "README mentions /team done");
+		assert(readme.includes("\"action\": \"team_done\""), "README mentions teams tool team_done action");
 		assert(readme.includes("/team style list"), "README mentions /team style list");
 		assert(readme.includes("/team attach <teamId> [--claim]"), "README mentions /team attach claim mode");
 		assert(readme.includes("/team detach"), "README mentions /team detach");
@@ -840,12 +1047,29 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("`t` or `shift+t`"), "README mentions panel task toggle key");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");
 		assert(readme.includes("`r` reassign"), "README mentions panel task reassignment");
+		assert(readme.includes("tool args inline"), "README mentions transcript tool content display");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
 		assert(readme.includes("[--urgent]"), "README mentions --urgent flag");
 		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
 		assert(readme.includes("docs/hook-contract.md"), "README references hook contract doc");
+		assert(readme.includes("member_status"), "README mentions teams tool member_status action");
+		assert(readme.includes("PI_TEAMS_STALL_THRESHOLD_MS"), "README mentions stall threshold env var");
+		assert(readme.includes("Stall detection"), "README mentions stall detection feature");
+		assert(readme.includes("Time in state"), "README mentions time-in-state feature");
+	}
+
+	const skillPath = path.join(process.cwd(), "skills/agent-teams/SKILL.md");
+	if (!fs.existsSync(skillPath)) {
+		console.log("  (skipped) SKILL.md not found");
+	} else {
+		const skill = fs.readFileSync(skillPath, "utf8");
+		assert(skill.includes("team_done"), "SKILL.md mentions team_done action");
+		assert(skill.includes("/team done"), "SKILL.md mentions /team done command");
+		assert(skill.includes("urgent"), "SKILL.md mentions urgent flag");
+		assert(skill.includes("model_policy_get"), "SKILL.md mentions model_policy_get action");
+		assert(skill.includes("hooks_policy_get"), "SKILL.md mentions hooks_policy_get action");
 	}
 }
 
