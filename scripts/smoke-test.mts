@@ -748,6 +748,7 @@ console.log("\n11. docs/help drift guard");
 	assert(help.includes("/team style init"), "help mentions /team style init");
 	assert(help.includes("/team attach <teamId> [--claim]"), "help mentions /team attach claim mode");
 	assert(help.includes("/team detach"), "help mentions /team detach");
+	assert(help.includes("[--urgent]"), "help mentions --urgent flag");
 
 	const readmePath = path.join(process.cwd(), "README.md");
 	if (!fs.existsSync(readmePath)) {
@@ -775,6 +776,8 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");
 		assert(readme.includes("`r` reassign"), "README mentions panel task reassignment");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
+		assert(readme.includes("[--urgent]"), "README mentions --urgent flag");
+		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
 	}
 }
 

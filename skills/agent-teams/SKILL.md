@@ -59,6 +59,7 @@ teams({ action: "delegate", tasks: [{ text: "Implement auth", assignee: "alice" 
 teams({ action: "task_assign", taskId: "12", assignee: "alice" })
 teams({ action: "task_dep_add", taskId: "12", depId: "7" })
 teams({ action: "message_broadcast", message: "Sync: finishing this milestone" })
+teams({ action: "message_dm", name: "alice", message: "Stop using lib X, use Y instead", urgent: true })
 teams({ action: "member_kill", name: "alice" })
 teams({ action: "plan_reject", name: "alice", feedback: "Include rollback strategy" })
 teams({ action: "hooks_policy_get" })
@@ -99,12 +100,16 @@ Teammates auto-claim unassigned, unblocked tasks by default.
 ## Communication
 
 ```
-/team dm <name> <msg...>       # direct message to one teammate
-/team broadcast <msg...>       # message all teammates
-/team send <name> <msg...>     # RPC-based (immediate, for spawned teammates)
+/team dm <name> <msg...>              # direct message to one teammate
+/team dm <name> --urgent <msg...>     # urgent DM — interrupts active turn via steering
+/team broadcast <msg...>              # message all teammates
+/team broadcast --urgent <msg...>     # urgent broadcast — interrupts all active turns
+/team send <name> <msg...>            # RPC-based (immediate, for spawned teammates)
 ```
 
-Teammates can also message each other directly via the `team_message` tool, with the leader CC'd.
+Urgent messages (`--urgent` or `urgent=true` in tool calls) interrupt a teammate's active turn via steering instead of waiting for idle. Use sparingly — only for time-sensitive coordination like "stop using library X, it's broken".
+
+Teammates can also message each other directly via the `team_message` tool (with optional `urgent` flag), with the leader CC'd.
 
 ## Governance modes
 
