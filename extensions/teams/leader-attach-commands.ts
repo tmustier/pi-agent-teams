@@ -42,7 +42,6 @@ export async function handleTeamAttachCommand(opts: {
 		setStyle,
 		setTaskListId,
 		refreshTasks,
-		renderWidget,
 		restoreWidget,
 	} = opts;
 
