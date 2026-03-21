@@ -94,7 +94,10 @@ function summarizeToolResult(toolName: string, result: unknown, isError: boolean
 		if (isRecord(result)) {
 			// Try content array first (ToolResultMessage shape)
 			const contentText = extractContentText(result);
-			if (contentText) return truncateSummary(contentText.replace(/\s+/g, " ").trim());
+			if (contentText !== null) {
+				const trimmed = contentText.replace(/\s+/g, " ").trim();
+				return trimmed.length > 0 ? truncateSummary(trimmed) : "error";
+			}
 			const msg = typeof result.message === "string"
 				? result.message
 				: typeof result.error === "string"
@@ -114,7 +117,7 @@ function summarizeToolResult(toolName: string, result: unknown, isError: boolean
 	if (isRecord(result)) {
 		// Try content array first (ToolResultMessage shape from agent-loop)
 		const contentText = extractContentText(result);
-		if (contentText) {
+		if (contentText !== null) {
 			const compact = contentText.replace(/\s+/g, " ").trim();
 			if (compact.length === 0) return "(empty)";
 			return truncateSummary(compact);
