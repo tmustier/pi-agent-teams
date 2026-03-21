@@ -144,10 +144,18 @@ Spawning with `plan` restricts the teammate to read-only tools. After producing 
 /team shutdown <name>          # graceful shutdown (teammate can reject if busy)
 /team prune [--all]            # hide stale manual teammates (mark offline in config)
 /team kill <name>              # force-terminate one RPC teammate
-/team cleanup [--force]        # delete team directory after all teammates stopped
+/team cleanup [--force]        # delete team directory, worktrees, and branches
+/team gc [--dry-run] [--force] [--max-age-hours=N]  # garbage-collect stale team dirs
 ```
 
 Teammates reject shutdown requests when they have an active task. Use `/team kill <name>` to force.
+
+## Cleanup
+
+Worktrees and branches are automatically cleaned up on session shutdown and session switch. For manual cleanup:
+
+- `/team cleanup [--force]` — removes the current team directory, including git worktrees and associated branches. Reports removal counts.
+- `/team gc [--dry-run] [--force] [--max-age-hours=N]` — garbage-collects stale team directories older than `N` hours (default: 24). Skips teams with online members or in-progress tasks. Use `--dry-run` to preview.
 
 ## Other commands
 

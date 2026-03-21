@@ -3,6 +3,12 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { sanitizeName } from "./names.js";
 
+export type WorktreeCleanupResult = {
+	removedWorktrees: string[];
+	removedBranches: string[];
+	warnings: string[];
+};
+
 async function execGit(args: string[], opts: { cwd: string; timeoutMs?: number } ): Promise<{ stdout: string; stderr: string }> {
 	return await new Promise((resolve, reject) => {
 		execFile(
@@ -100,4 +106,141 @@ export async function ensureWorktreeCwd(opts: {
 		warnings.push(`Failed to create git worktree (${branch}). Using shared workspace instead.`);
 		return { cwd: opts.leaderCwd, warnings, mode: "shared" };
 	}
+}
+
+/**
+ * Find the git repo root from a directory that may be inside a worktree.
+ * Returns null if not a git repo.
+ */
+async function findRepoRoot(cwd: string): Promise<string | null> {
+	try {
+		// --show-superproject-working-tree returns empty if not a worktree subproject.
+		// Use the commondir approach: worktrees share a common git dir with the main repo.
+		const commonDir = (await execGit(["rev-parse", "--git-common-dir"], { cwd })).stdout.trim();
+		if (commonDir && !path.isAbsolute(commonDir)) {
+			// Relative to the .git dir of the worktree — resolve upward.
+			const gitDir = (await execGit(["rev-parse", "--git-dir"], { cwd })).stdout.trim();
+			const absCommon = path.resolve(cwd, gitDir, commonDir);
+			// The common dir is the .git directory of the main repo. Its parent is the repo root.
+			return path.dirname(absCommon);
+		}
+		if (commonDir && path.isAbsolute(commonDir)) {
+			return path.dirname(commonDir);
+		}
+		// Fallback: plain repo
+		const toplevel = (await execGit(["rev-parse", "--show-toplevel"], { cwd })).stdout.trim();
+		return toplevel || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Remove all git worktrees under `<teamDir>/worktrees/` and their associated branches.
+ *
+ * Steps for each worktree:
+ * 1. `git worktree remove --force <path>` (removes the worktree checkout)
+ * 2. `git branch -D <branch>` (removes the local branch)
+ * 3. Falls back to filesystem removal if git commands fail
+ *
+ * Also runs `git worktree prune` to clean up stale worktree bookkeeping.
+ */
+export async function cleanupWorktrees(opts: {
+	teamDir: string;
+	teamId: string;
+	/** A directory known to be in the git repo (e.g. leaderCwd). */
+	repoCwd?: string;
+}): Promise<WorktreeCleanupResult> {
+	const removedWorktrees: string[] = [];
+	const removedBranches: string[] = [];
+	const warnings: string[] = [];
+
+	const worktreesDir = path.join(opts.teamDir, "worktrees");
+	let entries: string[];
+	try {
+		entries = await fs.promises.readdir(worktreesDir);
+	} catch {
+		// No worktrees directory — nothing to do.
+		return { removedWorktrees, removedBranches, warnings };
+	}
+
+	if (entries.length === 0) {
+		return { removedWorktrees, removedBranches, warnings };
+	}
+
+	// Find the repo root. Prefer deriving from the worktree paths themselves (they belong
+	// to the repo that created them), only fall back to repoCwd when none resolve.
+	// This avoids cross-repo issues when cleanup targets a team created from a different repo.
+	let repoRoot: string | null = null;
+	for (const entry of entries) {
+		const candidate = path.join(worktreesDir, entry);
+		repoRoot = await findRepoRoot(candidate);
+		if (repoRoot) break;
+	}
+	if (!repoRoot && opts.repoCwd) {
+		repoRoot = await findRepoRoot(opts.repoCwd);
+	}
+
+	const shortTeam = sanitizeName(opts.teamId).slice(0, 12) || "team";
+
+	for (const entry of entries) {
+		const worktreePath = path.join(worktreesDir, entry);
+		const safeAgent = sanitizeName(entry);
+		const branch = `pi-teams/${shortTeam}/${safeAgent}`;
+
+		// 1. Remove worktree via git
+		if (repoRoot) {
+			try {
+				await execGit(["worktree", "remove", "--force", worktreePath], { cwd: repoRoot, timeoutMs: 30_000 });
+				removedWorktrees.push(worktreePath);
+			} catch {
+				// Git removal failed — try filesystem fallback below.
+				try {
+					await fs.promises.rm(worktreePath, { recursive: true, force: true });
+					removedWorktrees.push(worktreePath);
+				} catch (fsErr: unknown) {
+					const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+					warnings.push(`Failed to remove worktree ${worktreePath}: ${msg}`);
+				}
+			}
+
+			// 2. Remove the associated branch
+			try {
+				await execGit(["branch", "-D", branch], { cwd: repoRoot });
+				removedBranches.push(branch);
+			} catch {
+				// Branch may not exist (shared workspace fallback) — that's fine.
+			}
+		} else {
+			// No repo root — just delete the directory.
+			try {
+				await fs.promises.rm(worktreePath, { recursive: true, force: true });
+				removedWorktrees.push(worktreePath);
+			} catch (fsErr: unknown) {
+				const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+				warnings.push(`Failed to remove worktree directory ${worktreePath}: ${msg}`);
+			}
+		}
+	}
+
+	// 3. Prune stale worktree bookkeeping entries
+	if (repoRoot) {
+		try {
+			await execGit(["worktree", "prune"], { cwd: repoRoot });
+		} catch {
+			warnings.push("git worktree prune failed (non-fatal)");
+		}
+	}
+
+	// 4. Remove the now-empty worktrees directory itself
+	try {
+		const remaining = await fs.promises.readdir(worktreesDir);
+		if (remaining.length === 0) {
+			await fs.promises.rmdir(worktreesDir);
+		}
+	} catch {
+		// ignore — best effort
+	}
+
+	return { removedWorktrees, removedBranches, warnings };
 }
