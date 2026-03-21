@@ -46,6 +46,7 @@ Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations
 | `member_shutdown` | `name` or `all=true` | Graceful mailbox shutdown request. |
 | `member_kill` | `name` | Force-stop RPC teammate. |
 | `member_prune` | _(none)_ | Mark stale workers offline (`all=true` to force). |
+| `team_done` | _(none)_ | End team run: stop teammates, hide widget (`all=true` to force with in-progress tasks). |
 | `plan_approve` / `plan_reject` | `name` | Resolve pending plan approvals (`feedback` optional for reject). |
 | `hooks_policy_get` | _(none)_ | Read team hooks policy (configured + effective). |
 | `hooks_policy_set` | one or more: `hookFailureAction`, `hookMaxReopensPerTask`, `hookFollowupOwner` | Update team hooks policy at runtime (`hooksPolicyReset=true` clears team overrides first). |
@@ -66,6 +67,7 @@ teams({ action: "hooks_policy_get" })
 teams({ action: "hooks_policy_set", hookFailureAction: "reopen_followup", hookMaxReopensPerTask: 2, hookFollowupOwner: "member" })
 teams({ action: "model_policy_get" })
 teams({ action: "model_policy_check", model: "openai-codex/gpt-5.1-codex-mini" })
+teams({ action: "team_done" })
 ```
 
 This covers most day-to-day orchestration without slash commands. For nuanced/manual control, use `/team ...` commands directly.
@@ -144,10 +146,12 @@ Spawning with `plan` restricts the teammate to read-only tools. After producing 
 /team shutdown <name>          # graceful shutdown (teammate can reject if busy)
 /team prune [--all]            # hide stale manual teammates (mark offline in config)
 /team kill <name>              # force-terminate one RPC teammate
+/team done [--force]           # end run: stop teammates + hide widget
 /team cleanup [--force]        # delete team directory, worktrees, and branches
 /team gc [--dry-run] [--force] [--max-age-hours=N]  # garbage-collect stale team dirs
 ```
 
+When all tasks complete and teammates are idle, the widget shows "All tasks done." with a `/team done` hint.
 Teammates reject shutdown requests when they have an active task. Use `/team kill <name>` to force.
 
 ## Cleanup

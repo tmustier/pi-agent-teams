@@ -142,8 +142,12 @@ export async function handleTeamSpawnCommand(opts: {
 
 	for (const w of res.warnings) ctx.ui.notify(w, "warning");
 	const displayName = formatMemberDisplayName(style, res.name);
+	const extras: string[] = [];
+	if (res.model) extras.push(res.model);
+	if (res.thinking) extras.push(`thinking:${res.thinking}`);
+	const extrasStr = extras.length > 0 ? ` \u00b7 ${extras.join(" \u00b7 ")}` : "";
 	ctx.ui.notify(
-		`${displayName} ${strings.joinedVerb} (${res.mode}${res.note ? ", " + res.note : ""} \u00b7 ${res.workspaceMode})`,
+		`${displayName} ${strings.joinedVerb} (${res.mode}${res.note ? ", " + res.note : ""} \u00b7 ${res.workspaceMode}${extrasStr})`,
 		"info",
 	);
 }

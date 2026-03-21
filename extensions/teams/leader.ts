@@ -14,6 +14,7 @@ import { heartbeatTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-
 import { ensureWorktreeCwd, cleanupWorktrees } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
+import { isTeamDone } from "./teams-ui-shared.js";
 import { createTeamsWidget } from "./teams-widget.js";
 import { resolveTeammateModelSelection, formatProviderModel } from "./model-policy.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
@@ -411,7 +412,15 @@ export function runLeader(pi: ExtensionAPI): void {
 		isDelegateMode: () => delegateMode,
 		getActiveTeamId: () => currentTeamId,
 		getSessionTeamId: () => currentCtx?.sessionManager.getSessionId() ?? null,
+		getLeaderModel: () => {
+			const model = currentCtx?.model;
+			if (!model) return null;
+			return { provider: model.provider, modelId: model.id };
+		},
 	});
+
+	// Auto-done detection: notify once when all tasks complete and teammates idle.
+	let autoDoneNotified = false;
 
 	const refreshTasks = async () => {
 		if (!currentCtx || !currentTeamId) return;
@@ -429,6 +438,17 @@ export function runLeader(pi: ExtensionAPI): void {
 				style,
 			}));
 		style = teamConfig.style ?? style;
+
+		// Auto-done hint (fire once per "all done" state transition)
+		if (isTeamDone(tasks, teammates)) {
+			if (!autoDoneNotified) {
+				autoDoneNotified = true;
+				currentCtx.ui.notify("All tasks completed. Use /team done to end the team session.", "info");
+			}
+		} else {
+			// Reset when work resumes (new tasks added, etc.)
+			autoDoneNotified = false;
+		}
 	};
 
 	let widgetSuppressed = false;
@@ -437,6 +457,16 @@ export function runLeader(pi: ExtensionAPI): void {
 		if (!currentCtx || widgetSuppressed) return;
 		// Component widget (more informative + styled). Re-setting it is also our "refresh" trigger.
 		currentCtx.ui.setWidget("pi-teams", widgetFactory);
+	};
+
+	const hideWidget = () => {
+		widgetSuppressed = true;
+		if (currentCtx) currentCtx.ui.setWidget("pi-teams", undefined);
+	};
+
+	const restoreWidget = () => {
+		widgetSuppressed = false;
+		renderWidget();
 	};
 
 	const spawnTeammate: SpawnTeammateFn = async (ctx, opts): Promise<SpawnTeammateResult> => {
@@ -472,10 +502,21 @@ export function runLeader(pi: ExtensionAPI): void {
 
 		const t = new TeammateRpc(name, sessionFile);
 		teammates.set(name, t);
+		// Restore the widget if it was hidden by /team done — new work is starting.
+		restoreWidget();
 		// Track teammate activity for the widget/panel.
+		// Render on status-changing events for a more "live" feel.
 		const unsub = t.onEvent((ev) => {
 			tracker.handleEvent(name, ev);
 			transcriptTracker.handleEvent(name, ev);
+			// Refresh widget on events that change visible state (tool start/end, turn end).
+			if (
+				ev.type === "tool_execution_start" ||
+				ev.type === "tool_execution_end" ||
+				ev.type === "agent_end"
+			) {
+				renderWidget();
+			}
 		});
 		teammateEventUnsubs.set(name, unsub);
 		renderWidget();
@@ -598,7 +639,17 @@ export function runLeader(pi: ExtensionAPI): void {
 		await refreshTasks();
 		renderWidget();
 
-		return { ok: true, name, mode, workspaceMode, childCwd, note, warnings };
+		return {
+			ok: true,
+			name,
+			mode,
+			workspaceMode,
+			childCwd,
+			note,
+			model: childModel ?? undefined,
+			thinking: thinkingLevel,
+			warnings,
+		};
 	};
 
 	const pollLeaderInbox = async () => {
@@ -614,6 +665,9 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 			pendingPlanApprovals,
 			enqueueHook,
+			sendLeaderLlmMessage: (content, options) => {
+				pi.sendUserMessage(content, options);
+			},
 		});
 	};
 
@@ -632,6 +686,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		// use `/team task use <taskListId>` after switching.
 		taskListId = currentTeamId;
 		lastAttachClaimHeartbeatMs = 0;
+		// Clear any /team done suppression from a previous session.
+		widgetSuppressed = false;
+		autoDoneNotified = false;
 
 		// Claude-style: a persisted team config file.
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
@@ -699,6 +756,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		// use `/team task use <taskListId>` after switching.
 		taskListId = currentTeamId;
 		lastAttachClaimHeartbeatMs = 0;
+		// Clear any /team done suppression — new session context.
+		widgetSuppressed = false;
+		autoDoneNotified = false;
 
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
@@ -762,8 +822,15 @@ export function runLeader(pi: ExtensionAPI): void {
 		spawnTeammate,
 		getTeamId: (ctx) => currentTeamId ?? ctx.sessionManager.getSessionId(),
 		getTaskListId: () => taskListId,
+		getTracker: () => tracker,
+		getTeamConfig: () => teamConfig,
 		refreshTasks,
 		renderWidget,
+		hideWidget,
+		stopAllTeammates: async (reason: string) => {
+			if (!currentCtx) return;
+			await stopAllTeammates(currentCtx, reason);
+		},
 		pendingPlanApprovals,
 	});
 
@@ -868,13 +935,16 @@ export function runLeader(pi: ExtensionAPI): void {
 			getSessionTeamId() {
 				return ctx.sessionManager.getSessionId();
 			},
+			getLeaderModel() {
+				const model = currentCtx?.model;
+				if (!model) return null;
+				return { provider: model.provider, modelId: model.id };
+			},
 			suppressWidget() {
-				widgetSuppressed = true;
-				ctx.ui.setWidget("pi-teams", undefined);
+				hideWidget();
 			},
 			restoreWidget() {
-				widgetSuppressed = false;
-				renderWidget();
+				restoreWidget();
 			},
 		});
 	};
@@ -920,9 +990,12 @@ export function runLeader(pi: ExtensionAPI): void {
 				ctx,
 				teammates,
 				getTeamConfig: () => teamConfig,
+				getTracker: () => tracker,
 				getTasks: () => tasks,
 				refreshTasks,
 				renderWidget,
+				hideWidget,
+				restoreWidget,
 				getTaskListId: () => taskListId,
 				setTaskListId: (id) => {
 					taskListId = id;

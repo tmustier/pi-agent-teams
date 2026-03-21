@@ -10,8 +10,8 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 export type TranscriptEntry =
 	| { kind: "text"; text: string; timestamp: number }
-	| { kind: "tool_start"; toolName: string; summary: string; timestamp: number }
-	| { kind: "tool_end"; toolName: string; durationMs: number; summary: string; isError: boolean; timestamp: number }
+	| { kind: "tool_start"; toolName: string; content: string | null; timestamp: number }
+	| { kind: "tool_end"; toolName: string; content: string | null; isError: boolean; durationMs: number; timestamp: number }
 	| { kind: "turn_end"; turnNumber: number; tokens: number; timestamp: number };
 
 const MAX_TRANSCRIPT = 200;
@@ -167,6 +167,81 @@ export class TranscriptLog {
 	}
 }
 
+// ── Tool content extraction ──
+// Extracts a compact, human-readable summary from tool args/results.
+// Budget: ≤120 chars to fit one terminal line minus timestamp prefix.
+
+const MAX_CONTENT_LEN = 120;
+
+function truncateContent(s: string, maxLen: number = MAX_CONTENT_LEN): string {
+	const oneLine = s.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+	if (oneLine.length <= maxLen) return oneLine;
+	return oneLine.slice(0, maxLen - 1) + "\u2026";
+}
+
+/**
+ * Extract a display-friendly summary from tool start args.
+ *
+ * Known tool shapes:
+ *   read  → { path }
+ *   edit  → { path }
+ *   write → { path }
+ *   bash  → { command }
+ *   grep  → { pattern, path? }
+ *   glob  → { pattern }
+ *
+ * Falls back to the first short string value for unknown tools.
+ */
+function extractStartContent(toolName: string, args: unknown): string | null {
+	if (!isRecord(args)) return null;
+	const key = toolName.toLowerCase();
+
+	if (key === "read" || key === "edit" || key === "write") {
+		const p = args.path;
+		return typeof p === "string" ? truncateContent(p) : null;
+	}
+	if (key === "bash") {
+		const cmd = args.command;
+		return typeof cmd === "string" ? truncateContent(cmd) : null;
+	}
+	if (key === "grep") {
+		const pattern = args.pattern;
+		const path = args.path;
+		if (typeof pattern !== "string") return null;
+		const suffix = typeof path === "string" ? ` in ${path}` : "";
+		return truncateContent(`/${pattern}/${suffix}`);
+	}
+	if (key === "glob" || key === "find") {
+		const pattern = args.pattern;
+		return typeof pattern === "string" ? truncateContent(pattern) : null;
+	}
+
+	// Unknown tool: show the first short string arg value (if any).
+	for (const v of Object.values(args)) {
+		if (typeof v === "string" && v.length > 0 && v.length <= MAX_CONTENT_LEN) {
+			return truncateContent(v);
+		}
+	}
+	return null;
+}
+
+/**
+ * Extract a display-friendly summary from tool end result.
+ *
+ * For errors: first line of error text.
+ * For success: null (the tool_end line already shows tool name + duration;
+ * adding full output would be noisy).
+ */
+function extractEndContent(isError: boolean, result: unknown): string | null {
+	if (!isError) return null;
+	if (typeof result === "string") return truncateContent(result);
+	if (isRecord(result)) {
+		const msg = result.error ?? result.message ?? result.stderr ?? result.output;
+		if (typeof msg === "string") return truncateContent(msg);
+	}
+	return null;
+}
+
 export class TranscriptTracker {
 	private logs = new Map<string, TranscriptLog>();
 	private toolStarts = new Map<string, Map<string, number>>(); // name -> toolCallId -> startTimestamp
@@ -195,8 +270,8 @@ export class TranscriptTracker {
 			const starts = this.toolStarts.get(name) ?? new Map<string, number>();
 			starts.set(ev.toolCallId, now);
 			this.toolStarts.set(name, starts);
-			const summary = summarizeToolArgs(ev.toolName, ev.args);
-			log.push({ kind: "tool_start", toolName: ev.toolName, summary, timestamp: now });
+			const content = extractStartContent(ev.toolName, ev.args);
+			log.push({ kind: "tool_start", toolName: ev.toolName, content, timestamp: now });
 			return;
 		}
 
@@ -205,8 +280,8 @@ export class TranscriptTracker {
 			const startTs = starts?.get(ev.toolCallId);
 			const durationMs = startTs === undefined ? 0 : now - startTs;
 			starts?.delete(ev.toolCallId);
-			const summary = summarizeToolResult(ev.toolName, ev.result, ev.isError);
-			log.push({ kind: "tool_end", toolName: ev.toolName, durationMs, summary, isError: ev.isError, timestamp: now });
+			const content = extractEndContent(ev.isError, ev.result);
+			log.push({ kind: "tool_end", toolName: ev.toolName, content, isError: ev.isError, durationMs, timestamp: now });
 			return;
 		}
 

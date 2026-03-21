@@ -33,6 +33,14 @@ import {
 	updateTask,
 } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
+import type { ActivityTracker } from "./activity-tracker.js";
+import {
+	resolveDisplayStatus,
+	formatElapsed,
+	lastMessageSummary,
+	formatTokens,
+	toolActivity,
+} from "./teams-ui-shared.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 
 type TeamsToolDelegateTask = { text: string; assignee?: string };
@@ -56,9 +64,11 @@ const TeamsActionSchema = StringEnum(
 		"message_broadcast",
 		"message_steer",
 		"member_spawn",
+		"member_status",
 		"member_shutdown",
 		"member_kill",
 		"member_prune",
+		"team_done",
 		"plan_approve",
 		"plan_reject",
 		"hooks_policy_get",
@@ -115,7 +125,7 @@ const TeamsToolParamsSchema = Type.Object({
 	message: Type.Optional(Type.String({ description: "Message body for messaging actions." })),
 	reason: Type.Optional(Type.String({ description: "Optional reason for lifecycle actions." })),
 	feedback: Type.Optional(Type.String({ description: "Feedback for action=plan_reject." })),
-	all: Type.Optional(Type.Boolean({ description: "For member_shutdown/member_prune, apply to all workers." })),
+	all: Type.Optional(Type.Boolean({ description: "For member_shutdown/member_prune: apply to all workers. For team_done: force even with in-progress tasks." })),
 	planRequired: Type.Optional(Type.Boolean({ description: "For member_spawn, start worker in plan-required mode." })),
 	teammates: Type.Optional(
 		Type.Array(Type.String(), {
@@ -156,11 +166,15 @@ export function registerTeamsTool(opts: {
 	spawnTeammate: SpawnTeammateFn;
 	getTeamId: (ctx: Parameters<SpawnTeammateFn>[0]) => string;
 	getTaskListId: () => string | null;
+	getTracker: () => ActivityTracker;
+	getTeamConfig: () => import("./team-config.js").TeamConfig | null;
 	refreshTasks: () => Promise<void>;
 	renderWidget: () => void;
+	hideWidget: () => void;
+	stopAllTeammates: (reason: string) => Promise<void>;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 }): void {
-	const { pi, teammates, spawnTeammate, getTeamId, getTaskListId, refreshTasks, renderWidget, pendingPlanApprovals } = opts;
+	const { pi, teammates, spawnTeammate, getTeamId, getTaskListId, getTracker, getTeamConfig: getTeamCfg, refreshTasks, renderWidget, hideWidget, stopAllTeammates, pendingPlanApprovals } = opts;
 
 	pi.registerTool({
 		name: "teams",
@@ -168,6 +182,8 @@ export function registerTeamsTool(opts: {
 		description: [
 			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
 			"You can also mutate existing tasks (assign, unassign, set status, dependencies), send team messages, run teammate lifecycle actions, and manage hooks/model policy without user slash commands.",
+			"Use member_status (with optional name) to get real-time worker state: activity, time in state, stall detection, tool use, tokens, and last message summary.",
+			"Use team_done to end a team run when all tasks are complete (stops teammates, hides widget).",
 			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
 			"Optional overrides: model='<provider>/<modelId>' and thinking (off|minimal|low|medium|high|xhigh).",
@@ -506,11 +522,152 @@ export function registerTeamsTool(opts: {
 				const lines: string[] = [
 					`Spawned ${formatMemberDisplayName(style, res.name)} (${res.mode}/${res.workspaceMode})`,
 				];
+				if (res.model) lines.push(`model: ${res.model}`);
+				if (res.thinking) lines.push(`thinking: ${res.thinking}`);
 				if (res.note) lines.push(`note: ${res.note}`);
 				for (const w of res.warnings) lines.push(`warning: ${w}`);
 				return {
 					content: [{ type: "text", text: lines.join("\n") }],
-					details: { action, teamId, name: res.name, mode: res.mode, workspaceMode: res.workspaceMode, warnings: res.warnings },
+					details: {
+						action,
+						teamId,
+						name: res.name,
+						mode: res.mode,
+						workspaceMode: res.workspaceMode,
+						model: res.model,
+						thinking: res.thinking,
+						warnings: res.warnings,
+					},
+				};
+			}
+
+			if (action === "member_status") {
+				const nameRaw = params.name?.trim();
+				const name = sanitizeName(nameRaw ?? "");
+				const teamCfg = getTeamCfg();
+
+				// If no name given, return summary for all workers.
+				if (!name) {
+					const allTasks = await listTasks(teamDir, effectiveTlId);
+					const tracker = getTracker();
+					const cfgMembers = teamCfg?.members ?? [];
+					const cfgByName = new Map<string, (typeof cfgMembers)[number]>();
+					for (const m of cfgMembers) cfgByName.set(m.name, m);
+
+					const workerNames = new Set<string>();
+					for (const n of teammates.keys()) workerNames.add(n);
+					for (const m of cfgMembers) {
+						if (m.role === "worker" && m.status === "online") workerNames.add(m.name);
+					}
+					for (const t of allTasks) {
+						if (t.owner && t.owner !== (teamCfg?.leadName ?? "") && t.status === "in_progress") workerNames.add(t.owner);
+					}
+
+					if (workerNames.size === 0) {
+						return {
+							content: [{ type: "text", text: `No ${strings.memberTitle.toLowerCase()}s to report on` }],
+							details: { action, teamId, workers: [] },
+						};
+					}
+
+					const workers: Array<Record<string, unknown>> = [];
+					const lines: string[] = [];
+					for (const n of Array.from(workerNames).sort()) {
+						const rpc = teammates.get(n);
+						const memberCfg = cfgByName.get(n);
+						const displayStatus = resolveDisplayStatus(rpc, memberCfg);
+						const activity = tracker.get(n);
+						const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+						const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
+						const currentTool = toolActivity(activity.currentToolName);
+						const msgPreview = lastMessageSummary(rpc, 80);
+						const model = memberCfg?.meta?.["model"];
+
+						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${currentTool ? ` (${currentTool})` : ""} · ${formatTokens(activity.totalTokens)} tokens`);
+						if (msgPreview) lines.push(`  last: ${msgPreview}`);
+
+						workers.push({
+							name: n,
+							status: displayStatus,
+							transportStatus: rpc?.status ?? "unknown",
+							timeInState: elapsed,
+							lastEventAgo: noEventFor,
+							currentTool: activity.currentToolName,
+							toolUseCount: activity.toolUseCount,
+							turnCount: activity.turnCount,
+							totalTokens: activity.totalTokens,
+							model: typeof model === "string" ? model : undefined,
+						});
+					}
+
+					return {
+						content: [{ type: "text", text: lines.join("\n") }],
+						details: { action, teamId, workers },
+					};
+				}
+
+				// Single worker status
+				const rpc = teammates.get(name);
+				const memberCfg = (teamCfg?.members ?? []).find((m) => m.name === name);
+				if (!rpc && !memberCfg) {
+					return {
+						content: [{ type: "text", text: `Unknown ${strings.memberTitle.toLowerCase()}: ${name}` }],
+						details: { action, name },
+					};
+				}
+
+				const displayStatus = resolveDisplayStatus(rpc, memberCfg);
+				const tracker = getTracker();
+				const activity = tracker.get(name);
+				const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+				const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
+				const currentTool = toolActivity(activity.currentToolName);
+				const msgPreview = lastMessageSummary(rpc, 120);
+				const allTasks = await listTasks(teamDir, effectiveTlId);
+				const owned = allTasks.filter((t) => t.owner === name);
+				const activeTask = owned.find((t) => t.status === "in_progress");
+				const model = memberCfg?.meta?.["model"];
+				const cwd = memberCfg?.cwd;
+
+				const lines: string[] = [
+					`${formatMemberDisplayName(style, name)}: ${displayStatus}`,
+					`time in state: ${elapsed || "(unknown)"}`,
+					`last event: ${noEventFor || "(unknown)"} ago`,
+					`current activity: ${currentTool || "(none)"}`,
+					`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
+				];
+				if (typeof model === "string" && model) lines.push(`model: ${model}`);
+				if (cwd) lines.push(`cwd: ${cwd}`);
+				if (activeTask) lines.push(`active task: #${activeTask.id} ${activeTask.subject}`);
+				lines.push(`tasks: ${owned.filter((t) => t.status === "pending").length} pending · ${owned.filter((t) => t.status === "in_progress").length} in-progress · ${owned.filter((t) => t.status === "completed").length} completed`);
+				if (msgPreview) lines.push(`last message: ${msgPreview}`);
+				if (displayStatus === "stalled") {
+					lines.push(`\u26a0 WARNING: no agent events for ${noEventFor} — worker may be stalled`);
+				}
+
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: {
+						action,
+						teamId,
+						name,
+						status: displayStatus,
+						transportStatus: rpc?.status ?? "unknown",
+						timeInState: elapsed,
+						lastEventAgo: noEventFor,
+						currentTool: activity.currentToolName,
+						toolUseCount: activity.toolUseCount,
+						turnCount: activity.turnCount,
+						totalTokens: activity.totalTokens,
+						model: typeof model === "string" ? model : undefined,
+						activeTaskId: activeTask?.id,
+						tasks: {
+							pending: owned.filter((t) => t.status === "pending").length,
+							inProgress: owned.filter((t) => t.status === "in_progress").length,
+							completed: owned.filter((t) => t.status === "completed").length,
+						},
+						stalled: displayStatus === "stalled",
+					},
 				};
 			}
 
@@ -644,6 +801,79 @@ export function registerTeamsTool(opts: {
 				return {
 					content: [{ type: "text", text: `Pruned ${pruned.length} stale ${strings.memberTitle.toLowerCase()}(s): ${pruned.map((n) => formatMemberDisplayName(style, n)).join(", ")}` }],
 					details: { action, teamId, pruned },
+				};
+			}
+
+			if (action === "team_done") {
+				const tasks = await listTasks(teamDir, effectiveTlId);
+				const inProgress = tasks.filter((t) => t.status === "in_progress");
+				const force = params.all === true;
+
+				if (inProgress.length > 0 && !force) {
+					return {
+						content: [{
+							type: "text",
+							text: `${inProgress.length} task(s) still in progress. Set all=true to force.`,
+						}],
+						details: {
+							action,
+							teamId,
+							status: "blocked",
+							reason: "tasks_in_progress",
+							inProgress: inProgress.length,
+							hint: "Set all=true to force, or wait for tasks to complete.",
+						},
+					};
+				}
+
+				// Stop all RPC teammates (reuses leader's stopAllTeammates for proper
+				// event unsub + tracker/transcript cleanup — avoids stale state on reuse).
+				await stopAllTeammates("team done");
+
+				// Mark config workers offline + send shutdown mailbox messages
+				const cfgWorkers = cfg.members.filter((m) => m.role === "worker" && m.status === "online");
+				for (const m of cfgWorkers) {
+					if (teammates.has(m.name)) continue; // already stopped via RPC above
+					const ts = new Date().toISOString();
+					try {
+						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, m.name, {
+							from: cfg.leadName,
+							text: JSON.stringify({
+								type: "shutdown_request",
+								requestId: randomUUID(),
+								from: cfg.leadName,
+								timestamp: ts,
+								reason: "Team done",
+							}),
+							timestamp: ts,
+						});
+					} catch {
+						// ignore mailbox errors
+					}
+					await setMemberStatus(teamDir, m.name, "offline", {
+						meta: { stoppedReason: "team-done", stoppedAt: ts },
+					});
+				}
+
+				await refreshTasks();
+				hideWidget();
+
+				const completed = tasks.filter((t) => t.status === "completed").length;
+				const pending = tasks.filter((t) => t.status === "pending").length;
+				return {
+					content: [{
+						type: "text",
+						text: `Team done. ${tasks.length} task(s): ${completed} completed, ${pending} pending${inProgress.length > 0 ? `, ${inProgress.length} were in-progress (unassigned)` : ""}. Widget hidden.`,
+					}],
+					details: {
+						action,
+						teamId,
+						status: "succeeded",
+						total: tasks.length,
+						completed,
+						pending,
+						unassigned: inProgress.length,
+					},
 				};
 			}
 
@@ -1052,6 +1282,8 @@ export function registerTeamsTool(opts: {
 			const lines: string[] = [];
 			if (spawned.length) {
 				lines.push(`Spawned: ${spawned.map((n) => formatMemberDisplayName(style, n)).join(", ")}`);
+				if (spawnModel) lines.push(`model: ${spawnModel}`);
+				if (spawnThinking) lines.push(`thinking: ${spawnThinking}`);
 			}
 			lines.push(`Delegated ${assignments.length} task(s):`);
 			for (const a of assignments) {

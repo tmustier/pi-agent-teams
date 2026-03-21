@@ -10,11 +10,20 @@ import {
 	isShutdownRejected,
 } from "./protocol.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
-import { getTask } from "./task-store.js";
+import { getTask, listTasks } from "./task-store.js";
 
 import type { TeamsHookInvocation } from "./hooks.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+
+/** Callback to inject a message into the leader LLM conversation. */
+export type SendLeaderLlmMessage = (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void;
+
+/** Truncate a result string to stay within token budget. */
+function truncateResult(text: string, maxLen: number): string {
+	if (text.length <= maxLen) return text;
+	return text.slice(0, maxLen) + "…";
+}
 
 export async function pollLeaderInbox(opts: {
 	ctx: ExtensionContext;
@@ -25,8 +34,9 @@ export async function pollLeaderInbox(opts: {
 	style: TeamsStyle;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 	enqueueHook?: (invocation: TeamsHookInvocation) => void;
+	sendLeaderLlmMessage?: SendLeaderLlmMessage;
 }): Promise<void> {
-	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook } = opts;
+	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook, sendLeaderLlmMessage } = opts;
 	const strings = getTeamsStrings(style);
 
 	let msgs: Awaited<ReturnType<typeof popUnreadMessages>>;
@@ -200,8 +210,59 @@ export async function pollLeaderInbox(opts: {
 
 				if (idle.completedTaskId && idle.completedStatus === "failed") {
 					ctx.ui.notify(`${name} aborted task #${idle.completedTaskId}`, "warning");
+
+					// Inject failure notification into leader LLM conversation
+					if (sendLeaderLlmMessage) {
+						const task = await getTask(teamDir, taskListId, idle.completedTaskId);
+						const subject = task?.subject ? `: ${task.subject}` : "";
+						// Failed tasks store abort details, not the success-only `result` field.
+						const abortReasonRaw = task?.metadata?.["abortReason"];
+						const partialResultRaw = task?.metadata?.["partialResult"];
+						const abortReason = typeof abortReasonRaw === "string" ? truncateResult(abortReasonRaw, 300) : undefined;
+						const partialResult = typeof partialResultRaw === "string" ? truncateResult(partialResultRaw, 300) : undefined;
+						const lines = [
+							`[Team] ${formatMemberDisplayName(style, name)} failed task #${idle.completedTaskId}${subject}`,
+						];
+						if (abortReason) lines.push(`Reason: ${abortReason}`);
+						if (partialResult) lines.push(`Partial result: ${partialResult}`);
+						sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
+					}
 				} else if (idle.completedTaskId) {
-					ctx.ui.notify(`${name} is idle task #${idle.completedTaskId}`, "info");
+					ctx.ui.notify(`${name} completed task #${idle.completedTaskId}`, "info");
+
+					// Inject completion notification into leader LLM conversation
+					if (sendLeaderLlmMessage) {
+						const task = await getTask(teamDir, taskListId, idle.completedTaskId);
+						const subject = task?.subject ? `: ${task.subject}` : "";
+						const resultRaw = task?.metadata?.["result"];
+						const result = typeof resultRaw === "string" ? truncateResult(resultRaw, 500) : undefined;
+						const lines = [
+							`[Team] ${formatMemberDisplayName(style, name)} completed task #${idle.completedTaskId}${subject}`,
+						];
+						if (result) lines.push(`Result: ${result}`);
+
+						// Check if all tasks are now completed
+						const allTasks = await listTasks(teamDir, taskListId);
+						const totalTasks = allTasks.length;
+						const completedTasks = allTasks.filter((t) => t.status === "completed");
+						const allDone = totalTasks > 0 && completedTasks.length === totalTasks;
+
+						if (allDone) {
+							lines.push("");
+							if (enqueueHook) {
+								// Hooks run asynchronously and may reopen tasks or create follow-ups.
+								lines.push(`All ${totalTasks} task(s) show completed — quality gates are still running and may change task states.`);
+							} else {
+								lines.push(`All ${totalTasks} task(s) are now completed. Review results and determine next steps.`);
+							}
+						} else {
+							const pending = allTasks.filter((t) => t.status === "pending").length;
+							const inProgress = allTasks.filter((t) => t.status === "in_progress").length;
+							lines.push(`Progress: ${completedTasks.length}/${totalTasks} done (${pending} pending, ${inProgress} in progress)`);
+						}
+
+						sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
+					}
 				} else {
 					ctx.ui.notify(`${name} is idle`, "info");
 				}

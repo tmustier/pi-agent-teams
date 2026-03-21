@@ -1,21 +1,28 @@
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Component, TUI } from "@mariozechner/pi-tui";
 import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
-import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
+import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import {
-	STATUS_COLOR,
-	STATUS_ICON,
+	DISPLAY_STATUS_COLOR,
+	DISPLAY_STATUS_ICON,
+	formatElapsed,
 	formatTokens,
+	getMemberModel,
+	getMemberThinking,
 	getVisibleWorkerNames,
+	isTeamDone,
 	padRight,
-	resolveStatus,
+	renderPolicySummary,
+	resolveDisplayStatus,
+	shortModelLabel,
 	toolActivity,
 } from "./teams-ui-shared.js";
+import type { DisplayStatus, LeaderModelInfo } from "./teams-ui-shared.js";
 
 export interface WidgetDeps {
 	getTeammates(): Map<string, TeammateRpc>;
@@ -26,6 +33,7 @@ export interface WidgetDeps {
 	isDelegateMode(): boolean;
 	getActiveTeamId(): string | null;
 	getSessionTeamId(): string | null;
+	getLeaderModel(): LeaderModelInfo | null;
 }
 
 export type WidgetFactory = (tui: TUI, theme: Theme) => Component;
@@ -34,11 +42,19 @@ interface WidgetRow {
 	icon: string; // raw char (before styling)
 	iconColor: ThemeColor;
 	displayName: string;
-	statusKey: TeammateStatus;
+	statusKey: DisplayStatus;
 	pending: number;
 	completed: number;
 	tokensStr: string; // "—" for chairman
 	activityText: string;
+	/** Compact time-in-current-state string, e.g. "3m12s". Empty for leader. */
+	elapsedStr: string;
+	/** Short model label (e.g. "claude-sonnet-4-5") or null. */
+	modelLabel: string | null;
+	/** Thinking level (e.g. "high") or null. */
+	thinkingLabel: string | null;
+	/** Active task subject (if any). */
+	activeTaskSubject: string | null;
 }
 
 function shortTeamId(teamId: string): string {
@@ -96,6 +112,15 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					);
 				}
 
+				// ── Policy summary ──
+				const policyLines = renderPolicySummary({
+					teamConfig,
+					leaderModel: deps.getLeaderModel(),
+					theme,
+					width,
+				});
+				for (const pl of policyLines) lines.push(pl);
+
 				// ── Build row data ──
 				const cfgMembers = teamConfig?.members ?? [];
 				const cfgByName = new Map<string, TeamMember>();
@@ -116,6 +141,10 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 						completed: leadTasks.filter((t) => t.status === "completed").length,
 						tokensStr: "\u2014",
 						activityText: "",
+						elapsedStr: "",
+						modelLabel: null,
+						thinkingLabel: null,
+						activeTaskSubject: null,
 					});
 				}
 
@@ -131,19 +160,27 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					for (const name of workerNames) {
 						const rpc = teammates.get(name);
 						const cfg = cfgByName.get(name);
-						const statusKey = resolveStatus(rpc, cfg);
+						const statusKey = resolveDisplayStatus(rpc, cfg);
 						const activity = tracker.get(name);
 						const owned = tasks.filter((t) => t.owner === name);
+						const activeTask = owned.find((t) => t.status === "in_progress");
+						const memberModel = getMemberModel(cfg);
+						const memberThinking = getMemberThinking(cfg);
+						const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
 
 						rows.push({
-							icon: STATUS_ICON[statusKey],
-							iconColor: STATUS_COLOR[statusKey],
+							icon: DISPLAY_STATUS_ICON[statusKey],
+							iconColor: DISPLAY_STATUS_COLOR[statusKey],
 							displayName: formatMemberDisplayName(style, name),
 							statusKey,
 							pending: owned.filter((t) => t.status === "pending").length,
 							completed: owned.filter((t) => t.status === "completed").length,
 							tokensStr: formatTokens(activity.totalTokens),
 							activityText: toolActivity(activity.currentToolName),
+							elapsedStr: elapsed,
+							modelLabel: memberModel ? shortModelLabel(memberModel) : null,
+							thinkingLabel: memberThinking,
+							activeTaskSubject: activeTask ? `#${String(activeTask.id)} ${activeTask.subject}` : null,
 						});
 					}
 
@@ -163,7 +200,7 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					for (const r of rows) {
 						const icon = theme.fg(r.iconColor, r.icon);
 						const styledName = theme.bold(r.displayName);
-						const statusLabel = theme.fg(STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
+						const statusLabel = theme.fg(DISPLAY_STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
 						const pNum = String(r.pending).padStart(pW);
 						const cNum = String(r.completed).padStart(cW);
 						const tokStr = r.tokensStr.padStart(tokW);
@@ -171,10 +208,21 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 							"dim",
 							` \u00b7 ${pNum} pending \u00b7 ${cNum} complete \u00b7 ${tokStr} tokens`,
 						);
+						const elapsedLabel = r.elapsedStr ? " " + theme.fg("dim", r.elapsedStr) : "";
 						const actLabel = r.activityText ? "  " + theme.fg("warning", r.activityText) : "";
+						// Model + thinking badge (compact)
+						const badges: string[] = [];
+						if (r.modelLabel) badges.push(r.modelLabel);
+						if (r.thinkingLabel && r.thinkingLabel !== "off") badges.push(`t:${r.thinkingLabel}`);
+						const badgeStr = badges.length > 0 ? "  " + theme.fg("muted", badges.join(" \u00b7 ")) : "";
 
-						const row = ` ${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${cols}${actLabel}`;
+						const row = ` ${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${elapsedLabel}${cols}${actLabel}${badgeStr}`;
 						lines.push(truncateToWidth(row, width));
+						// Active task on second line (indented, only when actively working)
+						if (r.activeTaskSubject) {
+							const taskLine = `     ${theme.fg("dim", "\u2514")} ${theme.fg("warning", r.activeTaskSubject)}`;
+							lines.push(truncateToWidth(taskLine, width));
+						}
 					}
 
 					// ── Total row ──
@@ -198,10 +246,15 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 				}
 
 				// ── Hints line ──
-				const hints = theme.fg(
-					"dim",
-					" /team widget \u00b7 /team dm <name> <msg> \u00b7 /team task list",
-				);
+				const teamDone = isTeamDone(tasks, teammates);
+				const hints = teamDone
+					? theme.fg("success", " All tasks done.") +
+						" " +
+						theme.fg("dim", "/team done \u00b7 /team task list")
+					: theme.fg(
+							"dim",
+							" /team widget \u00b7 /team dm <name> <msg> \u00b7 /team task list",
+						);
 				lines.push(truncateToWidth(hints, width));
 
 				return lines;
