@@ -11,7 +11,7 @@ import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
 import { getTeamDir } from "./paths.js";
 import { heartbeatTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
-import { ensureWorktreeCwd } from "./worktree.js";
+import { ensureWorktreeCwd, cleanupWorktrees } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
 import { createTeamsWidget } from "./teams-widget.js";
@@ -671,12 +671,25 @@ export function runLeader(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
+		const prevTeamId = currentTeamId;
+		const prevCwd = currentCtx?.cwd;
+
 		if (currentCtx) {
 			await releaseActiveAttachClaim(currentCtx);
 			const strings = getTeamsStrings(style);
 			await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is dissolved — leader moved on`);
 		}
 		stopLoops();
+
+		// Clean up worktrees from the old session before switching.
+		if (prevTeamId) {
+			const teamDir = getTeamDir(prevTeamId);
+			try {
+				await cleanupWorktrees({ teamDir, teamId: prevTeamId, repoCwd: prevCwd });
+			} catch {
+				// Best-effort — don't block session switch.
+			}
+		}
 
 		currentCtx = ctx;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
@@ -727,6 +740,16 @@ export function runLeader(pi: ExtensionAPI): void {
 		stopLoops();
 		const strings = getTeamsStrings(style);
 		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
+
+		// Clean up worktrees + branches for this team session so they don't accumulate on disk.
+		if (currentTeamId) {
+			const teamDir = getTeamDir(currentTeamId);
+			try {
+				await cleanupWorktrees({ teamDir, teamId: currentTeamId, repoCwd: currentCtx.cwd });
+			} catch {
+				// Best-effort — don't block shutdown.
+			}
+		}
 	});
 
 	registerTeamsTool({

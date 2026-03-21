@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { cleanupTeamDir } from "./cleanup.js";
+import { cleanupTeamDir, gcStaleTeamDirs } from "./cleanup.js";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir, getTeamsStylesDir } from "./paths.js";
@@ -220,13 +220,23 @@ export async function handleTeamCleanupCommand(opts: {
 	}
 
 	try {
-		await cleanupTeamDir(teamsRoot, teamDir);
+		const result = await cleanupTeamDir(teamsRoot, teamDir, { teamId, repoCwd: ctx.cwd });
+		const parts: string[] = [`Cleaned up team directory: ${teamDir}`];
+		if (result.worktreeResult.removedWorktrees.length > 0) {
+			parts.push(`Removed ${result.worktreeResult.removedWorktrees.length} worktree(s)`);
+		}
+		if (result.worktreeResult.removedBranches.length > 0) {
+			parts.push(`Removed ${result.worktreeResult.removedBranches.length} branch(es)`);
+		}
+		for (const w of result.warnings) {
+			parts.push(`⚠ ${w}`);
+		}
+		ctx.ui.notify(parts.join("\n"), "warning");
 	} catch (err) {
 		ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
 		return;
 	}
 
-	ctx.ui.notify(`Cleaned up team directory: ${teamDir}`, "warning");
 	await refreshTasks();
 	renderWidget();
 }
@@ -556,4 +566,86 @@ export async function handleTeamKillCommand(opts: {
 	ctx.ui.notify(`${formatMemberDisplayName(style, name)} ${strings.killedVerb} (SIGTERM)`, "warning");
 	await refreshTasks();
 	renderWidget();
+}
+
+const DEFAULT_GC_MAX_AGE_HOURS = 24;
+
+export async function handleTeamGcCommand(opts: {
+	ctx: ExtensionCommandContext;
+	rest: string[];
+}): Promise<void> {
+	const { ctx, rest } = opts;
+
+	const flags = rest.filter((a) => a.startsWith("--"));
+	const argsOnly = rest.filter((a) => !a.startsWith("--"));
+	const dryRun = flags.includes("--dry-run");
+	const force = flags.includes("--force");
+
+	const unknownFlags = flags.filter((f) => f !== "--dry-run" && f !== "--force" && !f.startsWith("--max-age-hours="));
+	if (unknownFlags.length) {
+		ctx.ui.notify(`Unknown flag(s): ${unknownFlags.join(", ")}`, "error");
+		return;
+	}
+	if (argsOnly.length) {
+		ctx.ui.notify("Usage: /team gc [--dry-run] [--force] [--max-age-hours=N]", "error");
+		return;
+	}
+
+	// Parse --max-age-hours=N
+	let maxAgeHours = DEFAULT_GC_MAX_AGE_HOURS;
+	const maxAgeFlag = flags.find((f) => f.startsWith("--max-age-hours="));
+	if (maxAgeFlag) {
+		const val = Number(maxAgeFlag.split("=")[1]);
+		if (!Number.isFinite(val) || val < 0) {
+			ctx.ui.notify("--max-age-hours must be a non-negative number", "error");
+			return;
+		}
+		maxAgeHours = val;
+	}
+
+	const teamsRoot = getTeamsRootDir();
+	const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
+
+	if (!force && !dryRun) {
+		if (process.stdout.isTTY && process.stdin.isTTY) {
+			const ok = await ctx.ui.confirm(
+				"Garbage collect teams",
+				`Remove all stale team directories older than ${maxAgeHours}h?\nTeams root: ${teamsRoot}`,
+			);
+			if (!ok) return;
+		} else {
+			ctx.ui.notify("Use --force or --dry-run in non-interactive mode", "error");
+			return;
+		}
+	}
+
+	const result = await gcStaleTeamDirs({
+		teamsRootDir: teamsRoot,
+		maxAgeMs,
+		repoCwd: ctx.cwd,
+		dryRun,
+	});
+
+	const lines: string[] = [];
+	if (dryRun) {
+		lines.push(`[DRY RUN] Would remove ${result.removed.length} of ${result.scanned} team dirs`);
+	} else {
+		lines.push(`Removed ${result.removed.length} of ${result.scanned} team dirs`);
+	}
+	if (result.skipped.length > 0) {
+		const byReason = new Map<string, number>();
+		for (const s of result.skipped) {
+			byReason.set(s.reason, (byReason.get(s.reason) ?? 0) + 1);
+		}
+		const parts: string[] = [];
+		for (const [reason, count] of byReason) {
+			parts.push(`${count} ${reason}`);
+		}
+		lines.push(`Skipped: ${parts.join(", ")}`);
+	}
+	for (const w of result.warnings) {
+		lines.push(`⚠ ${w}`);
+	}
+
+	ctx.ui.notify(lines.join("\n"), dryRun ? "info" : "warning");
 }
