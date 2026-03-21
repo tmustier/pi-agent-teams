@@ -112,7 +112,8 @@ Or drive it manually:
 
 /team shutdown alice                       # graceful shutdown (handshake)
 /team shutdown                             # stop all teammates (leader session remains active)
-/team cleanup                              # remove team artifacts when done
+/team cleanup                              # remove team artifacts (worktrees, branches, team dir)
+/team gc --dry-run                         # preview stale team dirs that would be removed
 ```
 
 Or let the model drive it with the delegate tool:
@@ -207,7 +208,8 @@ All management commands live under `/team`.
 | `/team shutdown` | Stop all teammates (RPC + best-effort manual) (leader session remains active) |
 | `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
 | `/team kill <name>` | Force-terminate |
-| `/team cleanup [--force]` | Delete team artifacts |
+| `/team cleanup [--force]` | Delete team artifacts (worktrees, branches, team dir) |
+| `/team gc [--dry-run] [--force] [--max-age-hours=N]` | Garbage-collect stale team dirs older than N hours (default: 24) |
 | `/team id` | Print team/task-list IDs and paths |
 | `/team env <name>` | Print env vars to start a manual teammate |
 
@@ -385,6 +387,14 @@ Deterministic leader-side integration flow that verifies failed `on_task_complet
 - task is reopened when policy includes `reopen`
 - follow-up task is created/assigned when policy includes `followup`
 - remediation mailbox nudge is emitted for the responsible teammate
+
+### Integration: cleanup and garbage collection
+
+```bash
+npm run integration-cleanup-test
+```
+
+Tests worktree/branch cleanup lifecycle, full team directory removal, GC age/activity filtering, and filesystem fallback when no git context is available.
 
 ### tmux dogfooding
 
