@@ -1149,6 +1149,7 @@ console.log("\n15. docs/help drift guard");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
 		assert(readme.includes("member_status"), "README mentions teams tool member_status action");
+		assert(readme.includes("/team status"), "README mentions /team status command");
 		assert(readme.includes("PI_TEAMS_STALL_THRESHOLD_MS"), "README mentions stall threshold env var");
 		assert(readme.includes("Stall detection"), "README mentions stall detection feature");
 		assert(readme.includes("Time in state"), "README mentions time-in-state feature");

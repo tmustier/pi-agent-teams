@@ -198,6 +198,7 @@ All management commands live under `/team`.
 | --- | --- |
 | `/team spawn <name> [fresh\|branch] [shared\|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]` | Start a teammate |
 | `/team list` | List teammates and their status |
+| `/team status [name]` | Real-time worker state: stall detection, time in state, activity (omit name for summary) |
 | `/team panel` | Interactive widget panel (same as `/tw`) |
 | `/team attach list` | Discover existing team workspaces under `<teamsRoot>` |
 | `/team attach <teamId> [--claim]` | Attach this session to an existing team workspace (`--claim` force-takes over an active claim) |
