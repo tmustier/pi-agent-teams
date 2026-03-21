@@ -169,6 +169,7 @@ export function registerTeamsTool(opts: {
 		description: [
 			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
 			"You can also mutate existing tasks (assign, unassign, set status, dependencies), send team messages, run teammate lifecycle actions, and manage hooks/model policy without user slash commands.",
+			"Use team_done to end a team run when all tasks are complete (stops teammates, hides widget).",
 			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
 			"Optional overrides: model='<provider>/<modelId>' and thinking (off|minimal|low|medium|high|xhigh).",
