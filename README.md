@@ -219,6 +219,17 @@ Model inheritance note:
 - Explicit deprecated `--model` overrides are rejected.
 - Agents can introspect/check this at runtime via `teams` actions: `{ "action": "model_policy_get" }` and `{ "action": "model_policy_check", "model": "..." }`.
 
+### Policy visibility
+
+Both the persistent widget and the interactive panel (`/tw`) show a compact policy
+summary below the header:
+
+- **Hooks**: on/off status, `failureAction`, `maxReopensPerTask`, `followupOwner` (effective values from team config + env fallback)
+- **Model**: leader model with deprecation warning when applicable, teammate selection source (`inherit`/`override`/`default`)
+
+These values reflect the same resolution as the `hooks_policy_get` and `model_policy_get`
+tool actions, but are continuously visible — no extra tool calls needed.
+
 ### Panel shortcuts (`/tw` / `/team panel`)
 
 - `↑/↓` or `w/s`: select teammate / scroll transcript
