@@ -226,6 +226,42 @@ function extractStartContent(toolName: string, args: unknown): string | null {
 }
 
 /**
+ * Extract a cleaner summary for display (may differ from content for some tools).
+ *
+ * grep: strips regex slashes → "TODO in /src" instead of "/TODO/ in /src"
+ * team_message: "→ bob: please rebase onto main" instead of just "bob"
+ * bash: normalizes whitespace
+ * Others: same as extractStartContent
+ */
+function extractStartSummary(toolName: string, args: unknown): string | null {
+	if (!isRecord(args)) return null;
+	const key = toolName.toLowerCase();
+
+	if (key === "grep") {
+		const pattern = args.pattern;
+		const path = args.path;
+		if (typeof pattern !== "string") return null;
+		const suffix = typeof path === "string" ? ` in ${path}` : "";
+		return truncateContent(`${pattern}${suffix}`);
+	}
+	if (key === "team_message" || key === "message_dm" || key === "message_broadcast") {
+		const recipient = args.recipient ?? args.to ?? args.name;
+		const message = args.message;
+		if (typeof recipient === "string" && typeof message === "string") {
+			return truncateContent(`→ ${recipient}: ${message}`);
+		}
+	}
+	if (key === "bash") {
+		const cmd = args.command;
+		if (typeof cmd === "string") {
+			return truncateContent(cmd.replace(/\s+/g, " ").trim());
+		}
+	}
+	// Fall through to default extraction
+	return extractStartContent(toolName, args);
+}
+
+/**
  * Extract a display-friendly summary from tool end result.
  *
  * For errors: first line of error text.
@@ -239,6 +275,49 @@ function extractEndContent(isError: boolean, result: unknown): string | null {
 		const msg = result.error ?? result.message ?? result.stderr ?? result.output;
 		if (typeof msg === "string") return truncateContent(msg);
 	}
+	return null;
+}
+
+/**
+ * Extract a display-friendly summary from tool end result (for both success and error).
+ *
+ * Unlike extractEndContent (which only extracts for errors), this extracts
+ * a compact summary from any result for display in the transcript.
+ */
+function extractEndSummary(isError: boolean, result: unknown): string | null {
+	// For errors, try existing logic first, then fall through to content array extraction
+	if (isError) {
+		const fromContent = extractEndContent(isError, result);
+		if (fromContent !== null) return fromContent;
+		// Fall through to handle { content: [{ type: "text", text: "..." }] } shape
+	}
+
+	// For success: try to extract text from common result shapes
+	if (typeof result === "string") {
+		return result.length === 0 ? "(empty)" : truncateContent(result.replace(/\n/g, " "));
+	}
+	if (isRecord(result)) {
+		// Handle { content: [{ type: "text", text: "..." }] } shape (common in pi tool results)
+		const content = result.content;
+		if (Array.isArray(content)) {
+			const texts: string[] = [];
+			for (const item of content) {
+				if (isRecord(item) && typeof item.text === "string") {
+					texts.push(item.text);
+				}
+			}
+			if (texts.length > 0) {
+				const joined = texts.join(" ").replace(/\n/g, " ");
+				return joined.length === 0 ? "(empty)" : truncateContent(joined);
+			}
+		}
+		// Handle { output: "..." } or { message: "..." }
+		const msg = result.output ?? result.message ?? result.text;
+		if (typeof msg === "string") {
+			return msg.length === 0 ? "(empty)" : truncateContent(msg.replace(/\n/g, " "));
+		}
+	}
+	// No extractable content
 	return null;
 }
 
@@ -271,7 +350,8 @@ export class TranscriptTracker {
 			starts.set(ev.toolCallId, now);
 			this.toolStarts.set(name, starts);
 			const content = extractStartContent(ev.toolName, ev.args);
-			log.push({ kind: "tool_start", toolName: ev.toolName, content, summary: content, timestamp: now });
+			const summary = extractStartSummary(ev.toolName, ev.args);
+			log.push({ kind: "tool_start", toolName: ev.toolName, content, summary, timestamp: now });
 			return;
 		}
 
@@ -281,7 +361,8 @@ export class TranscriptTracker {
 			const durationMs = startTs === undefined ? 0 : now - startTs;
 			starts?.delete(ev.toolCallId);
 			const content = extractEndContent(ev.isError, ev.result);
-			log.push({ kind: "tool_end", toolName: ev.toolName, content, summary: content, isError: ev.isError, durationMs, timestamp: now });
+			const summary = extractEndSummary(ev.isError, ev.result);
+			log.push({ kind: "tool_end", toolName: ev.toolName, content, summary, isError: ev.isError, durationMs, timestamp: now });
 			return;
 		}
 
