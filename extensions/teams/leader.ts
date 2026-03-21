@@ -14,6 +14,7 @@ import { heartbeatTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-
 import { ensureWorktreeCwd } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
+import { isTeamDone } from "./teams-ui-shared.js";
 import { createTeamsWidget } from "./teams-widget.js";
 import { resolveTeammateModelSelection, formatProviderModel } from "./model-policy.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
@@ -416,19 +417,6 @@ export function runLeader(pi: ExtensionAPI): void {
 	// Auto-done detection: notify once when all tasks complete and teammates idle.
 	let autoDoneNotified = false;
 
-	const checkAutoDone = (): boolean => {
-		if (tasks.length === 0) return false;
-		const pending = tasks.filter((t) => t.status === "pending").length;
-		const inProgress = tasks.filter((t) => t.status === "in_progress").length;
-		if (pending > 0 || inProgress > 0) return false;
-
-		// All teammates must be idle or stopped
-		for (const [, rpc] of teammates) {
-			if (rpc.status === "streaming" || rpc.status === "starting") return false;
-		}
-		return true;
-	};
-
 	const refreshTasks = async () => {
 		if (!currentCtx || !currentTeamId) return;
 		const teamDir = getTeamDir(currentTeamId);
@@ -447,7 +435,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		style = teamConfig.style ?? style;
 
 		// Auto-done hint (fire once per "all done" state transition)
-		if (checkAutoDone()) {
+		if (isTeamDone(tasks, teammates)) {
 			if (!autoDoneNotified) {
 				autoDoneNotified = true;
 				currentCtx.ui.notify("All tasks completed. Use /team done to end the team session.", "info");

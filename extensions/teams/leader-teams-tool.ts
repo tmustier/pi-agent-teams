@@ -667,11 +667,28 @@ export function registerTeamsTool(opts: {
 				}
 				teammates.clear();
 
-				// Mark config workers offline
+				// Mark config workers offline + send shutdown mailbox messages
 				const cfgWorkers = cfg.members.filter((m) => m.role === "worker" && m.status === "online");
 				for (const m of cfgWorkers) {
+					if (teammates.has(m.name)) continue; // already stopped via RPC above
+					const ts = new Date().toISOString();
+					try {
+						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, m.name, {
+							from: cfg.leadName,
+							text: JSON.stringify({
+								type: "shutdown_request",
+								requestId: randomUUID(),
+								from: cfg.leadName,
+								timestamp: ts,
+								reason: "Team done",
+							}),
+							timestamp: ts,
+						});
+					} catch {
+						// ignore mailbox errors
+					}
 					await setMemberStatus(teamDir, m.name, "offline", {
-						meta: { stoppedReason: "team-done", stoppedAt: new Date().toISOString() },
+						meta: { stoppedReason: "team-done", stoppedAt: ts },
 					});
 				}
 

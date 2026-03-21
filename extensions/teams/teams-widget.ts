@@ -12,6 +12,7 @@ import {
 	STATUS_ICON,
 	formatTokens,
 	getVisibleWorkerNames,
+	isTeamDone,
 	padRight,
 	resolveStatus,
 	toolActivity,
@@ -26,21 +27,6 @@ export interface WidgetDeps {
 	isDelegateMode(): boolean;
 	getActiveTeamId(): string | null;
 	getSessionTeamId(): string | null;
-}
-
-/**
- * Check if all tasks are completed and all teammates are idle/stopped.
- * Used by the widget to show a "done" hint.
- */
-function isTeamDone(tasks: TeamTask[], teammates: ReadonlyMap<string, TeammateRpc>): boolean {
-	if (tasks.length === 0) return false;
-	const pending = tasks.filter((t) => t.status === "pending").length;
-	const inProgress = tasks.filter((t) => t.status === "in_progress").length;
-	if (pending > 0 || inProgress > 0) return false;
-	for (const [, rpc] of teammates) {
-		if (rpc.status === "streaming" || rpc.status === "starting") return false;
-	}
-	return true;
 }
 
 export type WidgetFactory = (tui: TUI, theme: Theme) => Component;
