@@ -893,6 +893,21 @@ console.log("\n11. docs/help drift guard");
 		}
 	}
 
+	// Simulate team_message tool — should show recipient + message, not just recipient
+	tracker.handleEvent("alice", {
+		type: "tool_execution_start",
+		toolCallId: "tc4b",
+		toolName: "team_message",
+		args: { recipient: "bob", message: "please rebase onto main", urgent: false },
+	});
+	{
+		const e = lastEntry("alice");
+		assert(e.kind === "tool_start", "team_message tool_start recorded");
+		if (e.kind === "tool_start") {
+			assert(e.summary === "→ bob: please rebase onto main", "team_message summary includes recipient and message");
+		}
+	}
+
 	// Simulate unknown tool — fallback to first string arg
 	tracker.handleEvent("alice", {
 		type: "tool_execution_start",

@@ -61,6 +61,14 @@ function summarizeToolArgs(toolName: string, args: unknown): string {
 		return truncateSummary(url ?? query ?? "");
 	}
 
+	if (key === "team_message") {
+		const recipient = typeof args.recipient === "string" ? args.recipient : null;
+		const message = typeof args.message === "string" ? args.message : null;
+		if (recipient && message) return truncateSummary(`→ ${recipient}: ${message.replace(/\s+/g, " ").trim()}`);
+		if (message) return truncateSummary(message.replace(/\s+/g, " ").trim());
+		return recipient ? truncateSummary(`→ ${recipient}`) : "";
+	}
+
 	if (key === "task" || key === "teams") {
 		const action = typeof args.action === "string" ? args.action : null;
 		return action ? truncateSummary(action) : "";
