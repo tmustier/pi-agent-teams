@@ -73,10 +73,28 @@ function summarizeToolArgs(toolName: string, args: unknown): string {
 	return "";
 }
 
+/**
+ * Extract the first text content from a ToolResultMessage-shaped result.
+ * The agent-loop emits `{ content: [{type: "text", text: "..."}], ... }`.
+ */
+function extractContentText(result: Record<string, unknown>): string | null {
+	const content = result.content;
+	if (!Array.isArray(content)) return null;
+	for (const item of content) {
+		if (isRecord(item) && item.type === "text" && typeof item.text === "string") {
+			return item.text;
+		}
+	}
+	return null;
+}
+
 function summarizeToolResult(toolName: string, result: unknown, isError: boolean): string {
 	if (isError) {
 		if (typeof result === "string") return truncateSummary(result.replace(/\s+/g, " ").trim());
 		if (isRecord(result)) {
+			// Try content array first (ToolResultMessage shape)
+			const contentText = extractContentText(result);
+			if (contentText) return truncateSummary(contentText.replace(/\s+/g, " ").trim());
 			const msg = typeof result.message === "string"
 				? result.message
 				: typeof result.error === "string"
@@ -93,16 +111,23 @@ function summarizeToolResult(toolName: string, result: unknown, isError: boolean
 		return truncateSummary(compact);
 	}
 
-	if (Array.isArray(result)) {
-		return `${String(result.length)} items`;
-	}
-
 	if (isRecord(result)) {
-		// Check for common structured result shapes
+		// Try content array first (ToolResultMessage shape from agent-loop)
+		const contentText = extractContentText(result);
+		if (contentText) {
+			const compact = contentText.replace(/\s+/g, " ").trim();
+			if (compact.length === 0) return "(empty)";
+			return truncateSummary(compact);
+		}
+		// Fallback: check for common structured result shapes
 		const status = typeof result.status === "string" ? result.status : null;
 		if (status) return truncateSummary(status);
 		const output = typeof result.output === "string" ? result.output : null;
 		if (output) return truncateSummary(output.replace(/\s+/g, " ").trim());
+	}
+
+	if (Array.isArray(result)) {
+		return `${String(result.length)} items`;
 	}
 
 	return "";
