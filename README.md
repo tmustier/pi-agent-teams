@@ -213,13 +213,9 @@ All management commands live under `/team`.
 | `/team shutdown` | Stop all teammates (RPC + best-effort manual) (leader session remains active) |
 | `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
 | `/team kill <name>` | Force-terminate |
-<<<<<<< HEAD
 | `/team done [--force]` | End run: stop teammates + hide widget (auto-detects when all tasks complete) |
-| `/team cleanup [--force]` | Delete team artifacts |
-=======
 | `/team cleanup [--force]` | Delete team artifacts (worktrees, branches, team dir) |
 | `/team gc [--dry-run] [--force] [--max-age-hours=N]` | Garbage-collect stale team dirs older than N hours (default: 24) |
->>>>>>> origin/main
 | `/team id` | Print team/task-list IDs and paths |
 | `/team env <name>` | Print env vars to start a manual teammate |
 

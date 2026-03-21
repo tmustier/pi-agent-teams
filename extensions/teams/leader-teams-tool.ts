@@ -662,7 +662,14 @@ export function registerTeamsTool(opts: {
 							type: "text",
 							text: `${inProgress.length} task(s) still in progress. Set all=true to force.`,
 						}],
-						details: { action, teamId, inProgress: inProgress.length, blocked: true },
+						details: {
+							action,
+							teamId,
+							status: "blocked",
+							reason: "tasks_in_progress",
+							inProgress: inProgress.length,
+							hint: "Set all=true to force, or wait for tasks to complete.",
+						},
 					};
 				}
 
@@ -708,6 +715,7 @@ export function registerTeamsTool(opts: {
 					details: {
 						action,
 						teamId,
+						status: "succeeded",
 						total: tasks.length,
 						completed,
 						pending,

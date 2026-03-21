@@ -9,11 +9,8 @@ import { handleTeamAttachCommand, handleTeamDetachCommand } from "./leader-attac
 import {
 	handleTeamCleanupCommand,
 	handleTeamDelegateCommand,
-<<<<<<< HEAD
 	handleTeamDoneCommand,
-=======
 	handleTeamGcCommand,
->>>>>>> origin/main
 	handleTeamKillCommand,
 	handleTeamPruneCommand,
 	handleTeamShutdownCommand,

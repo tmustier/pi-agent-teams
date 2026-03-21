@@ -894,6 +894,18 @@ console.log("\n13. docs/help drift guard");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
 	}
+
+	const skillPath = path.join(process.cwd(), "skills/agent-teams/SKILL.md");
+	if (!fs.existsSync(skillPath)) {
+		console.log("  (skipped) SKILL.md not found");
+	} else {
+		const skill = fs.readFileSync(skillPath, "utf8");
+		assert(skill.includes("team_done"), "SKILL.md mentions team_done action");
+		assert(skill.includes("/team done"), "SKILL.md mentions /team done command");
+		assert(skill.includes("urgent"), "SKILL.md mentions urgent flag");
+		assert(skill.includes("model_policy_get"), "SKILL.md mentions model_policy_get action");
+		assert(skill.includes("hooks_policy_get"), "SKILL.md mentions hooks_policy_get action");
+	}
 }
 
 // ── summary ──────────────────────────────────────────────────────────
