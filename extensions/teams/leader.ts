@@ -162,6 +162,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		);
 		currentTeamId = sessionTeamId;
 		taskListId = sessionTeamId;
+		delegationTracker.clear();
 		await refreshTasks();
 		renderWidget();
 	};
