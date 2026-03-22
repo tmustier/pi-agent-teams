@@ -9,8 +9,9 @@ import { TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
 import { createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
-import { getTeamDir } from "./paths.js";
-import { heartbeatTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
+import { getTeamDir, getTeamsRootDir } from "./paths.js";
+import { assessAttachClaimFreshness, heartbeatTeamAttachClaim, readTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
+import { cleanupTeamDir, gcStaleTeamDirs } from "./cleanup.js";
 import { ensureWorktreeCwd, cleanupWorktrees } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
@@ -104,6 +105,29 @@ async function createSessionForTeammate(
 		const fallback = SessionManager.create(ctx.cwd, teamSessionsDir);
 		return { sessionFile: fallback.getSessionFile(), note: "branch(error->fresh)", warnings };
 	}
+}
+
+/** Check if a team dir has any task files across all task-list namespaces. */
+async function teamDirHasAnyTasks(teamDir: string): Promise<boolean> {
+	const tasksDir = path.join(teamDir, "tasks");
+	let taskListDirs: string[];
+	try {
+		taskListDirs = await fs.promises.readdir(tasksDir);
+	} catch {
+		return false;
+	}
+	for (const listDir of taskListDirs) {
+		const listPath = path.join(tasksDir, listDir);
+		try {
+			const stat = await fs.promises.stat(listPath);
+			if (!stat.isDirectory()) continue;
+			const files = await fs.promises.readdir(listPath);
+			if (files.some((f) => f.endsWith(".json") && !f.startsWith("."))) return true;
+		} catch {
+			continue;
+		}
+	}
+	return false;
 }
 
 // Message parsers are shared with the worker implementation.
@@ -701,6 +725,14 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 		});
 
+		// Startup GC: silently remove stale team directories from previous sessions (24h age floor).
+		void gcStaleTeamDirs({
+			teamsRootDir: getTeamsRootDir(),
+			maxAgeMs: 24 * 60 * 60 * 1000,
+		}).catch(() => {
+			// Best-effort; never block the session.
+		});
+
 		await refreshTasks();
 		renderWidget();
 
@@ -804,6 +836,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		if (!currentCtx) return;
 		await releaseActiveAttachClaim(currentCtx);
 		stopLoops();
+		const hadTeammates = teammates.size > 0;
 		const strings = getTeamsStrings(style);
 		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
 
@@ -816,6 +849,22 @@ export function runLeader(pi: ExtensionAPI): void {
 				await cleanupWorktrees({ teamDir, teamId: currentTeamId, repoCwd: currentCtx.cwd });
 			} catch {
 				// Best-effort — don't block shutdown.
+			}
+
+			// Exit cleanup: delete own team directory if it's empty.
+			// Conservative: only if no teammates were active, no tasks in ANY namespace,
+			// and no other session holds an attach claim. (Dirs with completed tasks are
+			// left for the 24h startup GC — intentionally asymmetric for safety.)
+			if (!hadTeammates) {
+				try {
+					const claim = await readTeamAttachClaim(teamDir);
+					const claimIsLive = claim !== null && !assessAttachClaimFreshness(claim).isStale;
+					if (!claimIsLive && !(await teamDirHasAnyTasks(teamDir))) {
+						await cleanupTeamDir(getTeamsRootDir(), teamDir);
+					}
+				} catch {
+					// Best-effort; never block shutdown.
+				}
 			}
 		}
 	});
