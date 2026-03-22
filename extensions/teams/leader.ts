@@ -729,6 +729,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		void gcStaleTeamDirs({
 			teamsRootDir: getTeamsRootDir(),
 			maxAgeMs: 24 * 60 * 60 * 1000,
+			excludeTeamIds: new Set([currentTeamId]),
 		}).catch(() => {
 			// Best-effort; never block the session.
 		});
@@ -852,15 +853,23 @@ export function runLeader(pi: ExtensionAPI): void {
 			}
 
 			// Exit cleanup: delete own team directory if it's empty.
-			// Conservative: only if no teammates were active, no tasks in ANY namespace,
-			// and no other session holds an attach claim. (Dirs with completed tasks are
-			// left for the 24h startup GC — intentionally asymmetric for safety.)
+			// Conservative: only if no RPC teammates were active, no online workers in
+			// config (manual/tmux), no tasks in ANY namespace, and no fresh attach claim.
+			// (Dirs with completed tasks are left for the 24h startup GC — intentionally
+			// asymmetric for safety.)
 			if (!hadTeammates) {
 				try {
 					const claim = await readTeamAttachClaim(teamDir);
 					const claimIsLive = claim !== null && !assessAttachClaimFreshness(claim).isStale;
-					if (!claimIsLive && !(await teamDirHasAnyTasks(teamDir))) {
-						await cleanupTeamDir(getTeamsRootDir(), teamDir);
+					if (claimIsLive) {
+						// Another session is using this team — don't delete.
+					} else {
+						// Also check config for online non-lead members (manual/tmux workers).
+						const cfg = await loadTeamConfig(teamDir);
+						const hasOnlineWorkers = cfg?.members.some((m) => m.role !== "lead" && m.status === "online") ?? false;
+						if (!hasOnlineWorkers && !(await teamDirHasAnyTasks(teamDir))) {
+							await cleanupTeamDir(getTeamsRootDir(), teamDir);
+						}
 					}
 				} catch {
 					// Best-effort; never block shutdown.

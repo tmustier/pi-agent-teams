@@ -79,13 +79,15 @@ export async function gcStaleTeamDirs(opts: {
 	maxAgeMs: number;
 	repoCwd?: string;
 	dryRun?: boolean;
+	/** Team IDs to skip (e.g. the current session's team). */
+	excludeTeamIds?: ReadonlySet<string>;
 }): Promise<{
 	scanned: number;
 	removed: string[];
 	skipped: Array<{ teamId: string; reason: string }>;
 	warnings: string[];
 }> {
-	const { teamsRootDir, maxAgeMs, repoCwd, dryRun } = opts;
+	const { teamsRootDir, maxAgeMs, repoCwd, dryRun, excludeTeamIds } = opts;
 	const teamsRootAbs = path.resolve(teamsRootDir);
 	const removed: string[] = [];
 	const skipped: Array<{ teamId: string; reason: string }> = [];
@@ -103,6 +105,10 @@ export async function gcStaleTeamDirs(opts: {
 	const now = Date.now();
 
 	for (const teamId of teamEntries) {
+		if (excludeTeamIds?.has(teamId)) {
+			skipped.push({ teamId, reason: "excluded" });
+			continue;
+		}
 		const teamDir = path.join(teamsRootAbs, teamId);
 		let stat: fs.Stats;
 		try {
