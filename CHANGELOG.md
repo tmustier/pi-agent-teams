@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+### Features
+
+- **Automatic startup GC** — on session start, silently removes stale team directories older than 24h (fire-and-forget, never blocks). Reuses the existing `gcStaleTeamDirs()` with age + state checks. (Thanks **@RensTillmann** — #8, #30)
+- **Exit cleanup of empty team dirs** — on session shutdown, deletes the session's own team directory if it has no tasks in any namespace, no active teammates (RPC or manual), and no attach claim from another session. (Thanks **@RensTillmann** — #8, #30)
+
+### Fixes
+
+- Added `excludeTeamIds` parameter to `gcStaleTeamDirs()` to prevent startup GC from removing the current session's team (important for resumed sessions older than 24h).
+
 ## 0.5.0
 
 ### Features
