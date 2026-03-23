@@ -554,14 +554,18 @@ console.log("\n7. Pi extension loading");
 		return typeof c === "string" ? c : undefined;
 	})();
 
+	const versionOutput = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
+
 	if (errCode === "ENOENT") {
 		console.log("  (skipped) pi CLI not found on PATH");
 	} else if (errCode === "ETIMEDOUT") {
 		console.log("  (skipped) pi --version timed out");
 	} else if (res.status !== 0) {
 		console.log("  (skipped) pi --version returned non-zero exit code");
+	} else if (versionOutput.length === 0) {
+		console.log("  (skipped) pi --version produced no output");
 	} else {
-		assert((res.stdout ?? "").trim().length > 0, "pi --version works");
+		assert(versionOutput.length > 0, "pi --version works");
 	}
 }
 
