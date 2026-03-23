@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+### Fixes
+
+- **Pi 0.62 metadata compatibility** — updated tool metadata wiring for recent Pi releases so teams tools continue to render the right prompt snippets/guidelines and stay compatible with current core APIs.
+- **Non-interactive exit hang** — leader polling timers now call `unref()` so print/json child sessions can exit cleanly instead of hanging after the agent finishes. This fixes subagent and other nested Pi flows that load the teams extension in the background.
+
 ## 0.5.1
 
 ### Features

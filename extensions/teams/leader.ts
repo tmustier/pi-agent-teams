@@ -750,6 +750,8 @@ export function runLeader(pi: ExtensionAPI): void {
 				refreshInFlight = false;
 			}
 		}, 1000);
+		// Don't keep non-interactive/child pi processes alive just because leader polling exists.
+		refreshTimer.unref?.();
 
 		inboxTimer = setInterval(async () => {
 			if (isStopping) return;
@@ -761,6 +763,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				inboxInFlight = false;
 			}
 		}, 700);
+		inboxTimer.unref?.();
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
@@ -820,6 +823,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				refreshInFlight = false;
 			}
 		}, 1000);
+		refreshTimer.unref?.();
 
 		inboxTimer = setInterval(async () => {
 			if (isStopping) return;
@@ -831,6 +835,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				inboxInFlight = false;
 			}
 		}, 700);
+		inboxTimer.unref?.();
 	});
 
 	pi.on("session_shutdown", async () => {
