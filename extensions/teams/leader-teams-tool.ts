@@ -191,6 +191,11 @@ export function registerTeamsTool(opts: {
 			"Optional overrides: model='<provider>/<modelId>' and thinking (off|minimal|low|medium|high|xhigh).",
 			"For governance, the user can run /team delegate on (leader restricted to coordination) or /team spawn <name> plan (worker needs plan approval).",
 		].join(" "),
+		promptSnippet: "Delegate work across teammates, inspect member status, message workers, and manage team lifecycle/tasks.",
+		promptGuidelines: [
+			"Use this tool when the user wants parallel agent work, worker coordination, or team lifecycle/task management.",
+			"Prefer member_status before interrupting or reassigning active teammates when the current state is unclear.",
+		],
 		parameters: TeamsToolParamsSchema,
 
 		async execute(_toolCallId, params: TeamsToolParamsType, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {

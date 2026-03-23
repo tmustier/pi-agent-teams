@@ -143,6 +143,11 @@ export function runWorker(pi: ExtensionAPI): void {
 		name: "team_message",
 		label: "Team Message",
 		description: "Send a message to a comrade. Use this to coordinate with peers on related tasks. Set urgent=true to interrupt their active turn (use sparingly — only for time-sensitive coordination).",
+		promptSnippet: "Send a coordination message to another teammate, optionally as an urgent interruption.",
+		promptGuidelines: [
+			"Use this tool for teammate-to-teammate coordination instead of overloading task status fields with freeform messages.",
+			"Set urgent=true only when the recipient must be interrupted before finishing their current turn.",
+		],
 		parameters: TeamMessageToolParamsSchema,
 		async execute(
 			_toolCallId,

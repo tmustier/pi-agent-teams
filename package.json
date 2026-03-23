@@ -1,6 +1,6 @@
 {
   "name": "@tmustier/pi-agent-teams",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Claude Code agent teams style workflow for Pi.",
   "license": "MIT",
   "author": "Thomas Mustier",
@@ -39,10 +39,10 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
-    "@mariozechner/pi-agent-core": "^0.52.8",
-    "@mariozechner/pi-ai": "^0.52.8",
-    "@mariozechner/pi-coding-agent": "^0.52.8",
-    "@mariozechner/pi-tui": "^0.52.8",
+    "@mariozechner/pi-agent-core": "^0.62.0",
+    "@mariozechner/pi-ai": "^0.62.0",
+    "@mariozechner/pi-coding-agent": "^0.62.0",
+    "@mariozechner/pi-tui": "^0.62.0",
     "@sinclair/typebox": "^0.34.48",
     "eslint": "^9.39.2",
     "tsx": "^4.20.5",
