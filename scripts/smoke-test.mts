@@ -69,7 +69,7 @@ import {
 	isPlanApprovedMessage,
 	isPlanRejectedMessage,
 } from "../extensions/teams/protocol.js";
-import { pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
+import { LeaderWakeTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { SessionManager, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
@@ -1114,6 +1114,7 @@ console.log("\n14. leader-inbox LLM message injection");
 		cwd: inboxTeamDir,
 		ui: { notify: () => {} },
 		sessionManager: { getSessionId: () => "inbox-team" },
+		isIdle: () => true,
 	} as unknown as ExtensionContext;
 
 	await pollLeaderInbox({
@@ -1232,6 +1233,72 @@ console.log("\n14. leader-inbox LLM message injection");
 		assert(hookMsg.content.includes("quality gates are still running"), "allDone qualified when hooks active");
 		assert(!hookMsg.content.includes("Review results and determine next steps"), "no premature wrap-up prompt when hooks active");
 	}
+
+	// Test stalled-team wake-up: workers report idle, no tasks are in progress, but pending work remains.
+	const t4 = await createTask(inboxTeamDir, inboxTaskListId, { subject: "Follow up on flaky tests", description: "", owner: undefined });
+	const wakeTracker = new LeaderWakeTracker();
+	const ts4 = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "alice",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "alice",
+			timestamp: ts4,
+		}),
+		timestamp: ts4,
+	});
+
+	llmMessages.length = 0;
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+		wakeTracker,
+	});
+
+	assert(llmMessages.length === 1, "idle + pending state wakes the leader once");
+	const stalledMsg = llmMessages[0];
+	if (stalledMsg) {
+		assert(stalledMsg.content.includes("pending task(s) remain"), "stalled-team wake-up mentions pending tasks");
+		assert(stalledMsg.content.includes(t4.id), "stalled-team wake-up includes pending task id");
+		assert(stalledMsg.content.includes("Review the task graph"), "stalled-team wake-up tells leader to continue autonomously");
+		assertEq(stalledMsg.options?.deliverAs, undefined, "idle stalled-team wake-up starts a fresh turn when leader is idle");
+	}
+
+	const ts5 = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "bob",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "bob",
+			timestamp: ts5,
+		}),
+		timestamp: ts5,
+	});
+
+	llmMessages.length = 0;
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+		wakeTracker,
+	});
+
+	assert(llmMessages.length === 0, "stalled-team wake-up is deduplicated until task state changes");
 }
 
 // ── 15. docs/help drift guard ────────────────────────────────────────
