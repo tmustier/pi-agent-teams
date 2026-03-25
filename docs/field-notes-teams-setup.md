@@ -86,6 +86,7 @@ First impressions:
   - Improvement idea: clearer naming and/or a single “message” command with a mode flag.
 
 - **Runaway tasks / timeboxing**: a vague task prompt can turn into a long “research spiral”.
+- **Leader wake-up gap**: if workers all became idle while pending tasks remained (for example, blocked/assigned work that auto-claim could not progress), the leader previously might not take another turn until nudged. The fix is to inject a deduplicated `[Team]` wake-up prompt whenever the team reaches an `idle + pending + no in_progress` state.
   - In manual-tmux mode, there isn’t a great way (yet) for the leader to *steer* an in-flight run (unlike `/team steer` for RPC-spawned comrades).
   - Improvement idea: add a mailbox-level “steer” protocol message that workers can treat as an in-flight follow-up if they’re currently running.
 

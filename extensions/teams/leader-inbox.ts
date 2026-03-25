@@ -10,7 +10,7 @@ import {
 	isShutdownRejected,
 } from "./protocol.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
-import { getTask, listTasks } from "./task-store.js";
+import { getTask, isTaskBlocked, listTasks } from "./task-store.js";
 
 import type { TeamsHookInvocation } from "./hooks.js";
 import type { TeamsStyle } from "./teams-style.js";
@@ -76,6 +76,24 @@ export class DelegationTracker {
 	}
 }
 
+/**
+ * Deduplicates leader wake-up prompts when the team is stalled in the same
+ * "pending tasks but nothing is in progress" state across multiple inbox polls.
+ */
+export class LeaderWakeTracker {
+	private pendingIdleSignature: string | null = null;
+
+	shouldNotifyPendingIdle(signature: string): boolean {
+		if (this.pendingIdleSignature === signature) return false;
+		this.pendingIdleSignature = signature;
+		return true;
+	}
+
+	clear(): void {
+		this.pendingIdleSignature = null;
+	}
+}
+
 /** Truncate a result string to stay within token budget. */
 function truncateResult(text: string, maxLen: number): string {
 	if (text.length <= maxLen) return text;
@@ -94,9 +112,15 @@ export async function pollLeaderInbox(opts: {
 	sendLeaderLlmMessage?: SendLeaderLlmMessage;
 	/** Batch delegation tracker for all-tasks-complete auto-notify. */
 	delegationTracker?: DelegationTracker;
+	/** Deduplicates leader wake-ups for repeated "idle + pending" states. */
+	wakeTracker?: LeaderWakeTracker;
 }): Promise<void> {
-	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook, sendLeaderLlmMessage, delegationTracker } = opts;
+	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook, sendLeaderLlmMessage, delegationTracker, wakeTracker } = opts;
 	const strings = getTeamsStrings(style);
+	const isLeaderIdle = (): boolean => {
+		const maybeCtx = ctx as ExtensionContext & { isIdle?: () => boolean };
+		return typeof maybeCtx.isIdle === "function" ? maybeCtx.isIdle() : false;
+	};
 
 	let msgs: Awaited<ReturnType<typeof popUnreadMessages>>;
 	try {
@@ -110,6 +134,7 @@ export async function pollLeaderInbox(opts: {
 	// Collect batch completions across all messages in this poll cycle,
 	// then fire notifications once at the end (avoids duplicate triggers).
 	const batchCompletions: Array<{ taskIds: string[] }> = [];
+	let sawPlainIdleNotification = false;
 
 	for (const m of msgs) {
 		const approved = isShutdownApproved(m.text);
@@ -170,6 +195,7 @@ export async function pollLeaderInbox(opts: {
 
 		const idle = isIdleNotification(m.text);
 		if (idle) {
+			if (!idle.completedTaskId && !idle.failureReason) sawPlainIdleNotification = true;
 			const name = sanitizeName(idle.from);
 
 			// Hook: always emit "idle" (best-effort, non-blocking)
@@ -290,14 +316,23 @@ export async function pollLeaderInbox(opts: {
 						const partialResultRaw = task?.metadata?.["partialResult"];
 						const abortReason = typeof abortReasonRaw === "string" ? truncateResult(abortReasonRaw, 300) : undefined;
 						const partialResult = typeof partialResultRaw === "string" ? truncateResult(partialResultRaw, 300) : undefined;
-						const lines = [
-							`[Team] ${formatMemberDisplayName(style, name)} failed task #${idle.completedTaskId}${subject}`,
-						];
-						if (abortReason) lines.push(`Reason: ${abortReason}`);
-						if (partialResult) lines.push(`Partial result: ${partialResult}`);
-						sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
+					const lines = [
+						`[Team] ${formatMemberDisplayName(style, name)} failed task #${idle.completedTaskId}${subject}`,
+					];
+					if (abortReason) lines.push(`Reason: ${abortReason}`);
+					if (partialResult) lines.push(`Partial result: ${partialResult}`);
+					const allTasks = await listTasks(teamDir, taskListId);
+					const pending = allTasks.filter((t) => t.status === "pending").length;
+					const inProgress = allTasks.filter((t) => t.status === "in_progress").length;
+					if (pending > 0 && inProgress === 0) {
+						lines.push(`State: ${pending} pending, ${inProgress} in progress.`);
+						lines.push(
+							"No tasks are currently in progress. Resolve blockers or reassign work and continue without waiting for the user.",
+						);
 					}
-				} else if (idle.completedTaskId) {
+					sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
+				}
+			} else if (idle.completedTaskId) {
 					ctx.ui.notify(`${name} completed task #${idle.completedTaskId}`, "info");
 
 					// Inject completion notification into leader LLM conversation
@@ -329,6 +364,11 @@ export async function pollLeaderInbox(opts: {
 							const pending = allTasks.filter((t) => t.status === "pending").length;
 							const inProgress = allTasks.filter((t) => t.status === "in_progress").length;
 							lines.push(`Progress: ${completedTasks.length}/${totalTasks} done (${pending} pending, ${inProgress} in progress)`);
+							if (pending > 0 && inProgress === 0) {
+								lines.push(
+									"No tasks are currently in progress. Resolve blockers or assignments and continue without waiting for the user.",
+								);
+							}
 						}
 
 						sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
@@ -359,7 +399,7 @@ export async function pollLeaderInbox(opts: {
 				: "Review the results and continue.";
 			const msg = `[Team] All delegated tasks completed (${taskRefs}). ${suffix}`;
 			try {
-				if (ctx.isIdle()) {
+				if (isLeaderIdle()) {
 					sendLeaderLlmMessage(msg);
 				} else {
 					sendLeaderLlmMessage(msg, { deliverAs: "followUp" });
@@ -369,4 +409,52 @@ export async function pollLeaderInbox(opts: {
 			}
 		}
 	}
+
+	if (!sendLeaderLlmMessage || !sawPlainIdleNotification) return;
+
+	const allTasks = await listTasks(teamDir, taskListId);
+	const pendingTasks = allTasks.filter((t) => t.status === "pending");
+	const inProgressTasks = allTasks.filter((t) => t.status === "in_progress");
+
+	if (pendingTasks.length === 0 || inProgressTasks.length > 0) {
+		wakeTracker?.clear();
+		return;
+	}
+
+	const pendingDetails = await Promise.all(
+		pendingTasks.map(async (task) => ({ task, blocked: await isTaskBlocked(teamDir, taskListId, task) })),
+	);
+	const readyCount = pendingDetails.filter((entry) => !entry.blocked).length;
+	const blockedCount = pendingDetails.length - readyCount;
+	const signature = JSON.stringify(
+		pendingDetails
+			.slice()
+			.sort((a, b) => Number(a.task.id) - Number(b.task.id))
+			.map(({ task, blocked }) => ({ id: task.id, owner: task.owner ?? "", blocked })),
+	);
+	if (wakeTracker && !wakeTracker.shouldNotifyPendingIdle(signature)) return;
+
+	const preview = pendingDetails
+		.slice(0, 5)
+		.map(({ task, blocked }) => {
+			const parts = [`- #${task.id}: ${task.subject}`];
+			if (task.owner) parts.push(`owner=${task.owner}`);
+			parts.push(blocked ? "blocked" : "ready");
+			return `${parts[0]} (${parts.slice(1).join(", ")})`;
+		})
+		.join("\n");
+
+	const lines = [
+		`[Team] No tasks are currently in progress, but ${pendingTasks.length} pending task(s) remain and teammates are idle.`,
+		`State: ${pendingTasks.length} pending (${readyCount} ready, ${blockedCount} blocked), ${inProgressTasks.length} in progress.`,
+		readyCount > 0
+			? "There is ready work that was not picked up automatically. Reassign it or investigate why it was not claimed."
+			: "The remaining tasks appear blocked or otherwise need leader intervention before workers can continue.",
+		preview ? `Pending tasks:\n${preview}` : undefined,
+		pendingTasks.length > 5 ? `... ${pendingTasks.length - 5} more pending task(s)` : undefined,
+		"Review the task graph, resolve blockers or assignments, and continue without waiting for the user.",
+	].filter((line): line is string => Boolean(line));
+
+	if (isLeaderIdle()) sendLeaderLlmMessage(lines.join("\n"));
+	else sendLeaderLlmMessage(lines.join("\n"), { deliverAs: "followUp" });
 }
