@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4
+
+### Fixes
+
+- **Clean branch-mode worker sessions** — teammates spawned with `contextMode=branch` now branch from the last stable pre-turn boundary, replay the active user request, preserve compaction entries, and materialize user-only fallbacks. This prevents workers from inheriting the leader's in-progress tool-use turn or reopening as blank sessions. (#35, #36)
+- **Accurate quality-gate completion notices** — leader completion and batch-complete messages now mention running quality gates only when hooks are actually enabled, instead of inferring that from the presence of an internal enqueue callback. (#37)
+
 ## 0.5.3
 
 ### Fixes
