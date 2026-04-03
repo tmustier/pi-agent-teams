@@ -5,7 +5,7 @@ import type { TeammateRpc } from "./teammate-rpc.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
-import { resolveDisplayStatus, formatElapsed, formatTokens, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
+import { resolveDisplayStatus, formatElapsed, formatTokens, getMemberModel, getMemberThinking, lastMessageSummary, shortModelLabel, toolActivity } from "./teams-ui-shared.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import { listTasks } from "./task-store.js";
 
@@ -50,7 +50,13 @@ export async function handleTeamListCommand(opts: {
 		const tool = toolActivity(activity.currentToolName);
 		const elapsedTag = elapsed ? ` ${elapsed}` : "";
 		const toolTag = tool ? ` (${tool})` : "";
-		lines.push(`${formatMemberDisplayName(style, name)}: ${displayStatus}${elapsedTag}${toolTag} [${kind}]`);
+		const memberModel = getMemberModel(cfg);
+		const memberThinking = getMemberThinking(cfg);
+		const badges: string[] = [];
+		if (memberModel) badges.push(shortModelLabel(memberModel));
+		if (memberThinking && memberThinking !== "off") badges.push(`t:${memberThinking}`);
+		const badgeTag = badges.length > 0 ? `  ${badges.join("/")}` : "";
+		lines.push(`${formatMemberDisplayName(style, name)}: ${displayStatus}${elapsedTag}${badgeTag}${toolTag} [${kind}]`);
 	}
 
 	ctx.ui.notify(lines.join("\n"), "info");
@@ -195,7 +201,13 @@ export async function handleTeamStatusCommand(opts: {
 			const tool = toolActivity(activity.currentToolName);
 			const toolTag = tool ? ` (${tool})` : "";
 			const stalledTag = displayStatus === "stalled" ? " ⚠ STALLED" : "";
-			lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${toolTag} · ${formatTokens(activity.totalTokens)} tokens${stalledTag}`);
+			const memberModel = getMemberModel(cfg);
+			const memberThinking = getMemberThinking(cfg);
+			const badges: string[] = [];
+			if (memberModel) badges.push(shortModelLabel(memberModel));
+			if (memberThinking && memberThinking !== "off") badges.push(`t:${memberThinking}`);
+			const badgeTag = badges.length > 0 ? ` · ${badges.join("/")}` : "";
+			lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${badgeTag}${toolTag} · ${formatTokens(activity.totalTokens)} tokens${stalledTag}`);
 		}
 		ctx.ui.notify(lines.join("\n"), "info");
 		return;
@@ -219,7 +231,8 @@ export async function handleTeamStatusCommand(opts: {
 	const allTasks = await listTasks(teamDir, effectiveTlId);
 	const owned = allTasks.filter((t) => t.owner === name);
 	const activeTask = owned.find((t) => t.status === "in_progress");
-	const model = memberCfg?.meta?.["model"];
+	const memberModel = getMemberModel(memberCfg);
+	const memberThinking = getMemberThinking(memberCfg);
 	const cwd = memberCfg?.cwd;
 
 	const lines: string[] = [
@@ -229,7 +242,8 @@ export async function handleTeamStatusCommand(opts: {
 		`current activity: ${currentTool || "(none)"}`,
 		`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
 	];
-	if (typeof model === "string" && model) lines.push(`model: ${model}`);
+	if (memberModel) lines.push(`model: ${memberModel}`);
+	if (memberThinking) lines.push(`thinking: ${memberThinking}`);
 	if (cwd) lines.push(`cwd: ${cwd}`);
 	if (activeTask) lines.push(`active task: #${activeTask.id} ${activeTask.subject}`);
 	lines.push(`tasks: ${owned.filter((t) => t.status === "pending").length} pending · ${owned.filter((t) => t.status === "in_progress").length} in-progress · ${owned.filter((t) => t.status === "completed").length} completed`);
