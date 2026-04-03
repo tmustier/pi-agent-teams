@@ -36,7 +36,10 @@ import { getMemberModel, getMemberThinking, shortModelLabel } from "../extension
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	HOOK_CONTRACT_VERSION,
+	HOOK_CONTRACT_VERSION_MIN,
 	buildHookContextPayload,
+	checkHookContractVersion,
+	parseHookContextSafe,
 	getTeamsHookFailureAction,
 	getTeamsHookFollowupOwnerPolicy,
 	getTeamsHookMaxReopensPerTask,
@@ -777,6 +780,186 @@ console.log("\n9. teams-hooks (quality gates)");
 	else process.env.PI_TEAMS_HOOKS_ENABLED = prevEnabled;
 }
 
+// ── 9b. hook contract version compatibility ─────────────────────────
+console.log("\n9b. hook contract version compatibility");
+{
+	// --- constants ---
+	assert(typeof HOOK_CONTRACT_VERSION === "number", "HOOK_CONTRACT_VERSION is a number");
+	assert(Number.isInteger(HOOK_CONTRACT_VERSION), "HOOK_CONTRACT_VERSION is an integer");
+	assert(HOOK_CONTRACT_VERSION >= 1, "HOOK_CONTRACT_VERSION >= 1");
+	assert(typeof HOOK_CONTRACT_VERSION_MIN === "number", "HOOK_CONTRACT_VERSION_MIN is a number");
+	assert(Number.isInteger(HOOK_CONTRACT_VERSION_MIN), "HOOK_CONTRACT_VERSION_MIN is an integer");
+	assert(HOOK_CONTRACT_VERSION_MIN >= 1, "HOOK_CONTRACT_VERSION_MIN >= 1");
+	assert(HOOK_CONTRACT_VERSION_MIN <= HOOK_CONTRACT_VERSION, "HOOK_CONTRACT_VERSION_MIN <= HOOK_CONTRACT_VERSION");
+
+	// --- checkHookContractVersion ---
+
+	// Exact match → compatible
+	const exactMatch = checkHookContractVersion(HOOK_CONTRACT_VERSION);
+	assertEq(exactMatch.status, "compatible", "exact version match is compatible");
+	assertEq(exactMatch.requestedVersion, HOOK_CONTRACT_VERSION, "exact match reports requested version");
+	assertEq(exactMatch.currentVersion, HOOK_CONTRACT_VERSION, "exact match reports current version");
+	assert(exactMatch.message.length > 0, "exact match has a message");
+
+	// Future version → newer_minor (additive fields OK)
+	const futureVersion = checkHookContractVersion(HOOK_CONTRACT_VERSION + 1);
+	assertEq(futureVersion.status, "newer_minor", "future version is newer_minor");
+	assertEq(futureVersion.requestedVersion, HOOK_CONTRACT_VERSION + 1, "future version reports requested version");
+	assert(futureVersion.message.includes("newer"), "future version message mentions newer");
+
+	// Far future version → still newer_minor (not unsupported)
+	const farFuture = checkHookContractVersion(HOOK_CONTRACT_VERSION + 100);
+	assertEq(farFuture.status, "newer_minor", "far future version is still newer_minor");
+
+	// Version 0 → unsupported (below minimum)
+	const versionZero = checkHookContractVersion(0);
+	assertEq(versionZero.status, "unsupported", "version 0 is unsupported");
+	assert(versionZero.message.includes("below"), "version 0 message mentions below minimum");
+
+	// Negative version → unsupported
+	const negativeVersion = checkHookContractVersion(-1);
+	assertEq(negativeVersion.status, "unsupported", "negative version is unsupported");
+
+	// Non-integer → unsupported
+	const fractional = checkHookContractVersion(1.5);
+	assertEq(fractional.status, "unsupported", "fractional version is unsupported");
+
+	// NaN → unsupported
+	const nan = checkHookContractVersion(NaN);
+	assertEq(nan.status, "unsupported", "NaN version is unsupported");
+
+	// --- parseHookContextSafe ---
+
+	// Valid v1 payload
+	const validPayload = buildHookContextPayload({
+		event: "task_completed",
+		teamId: "test-team",
+		teamDir: "/tmp/test",
+		taskListId: "test-tl",
+		style: "normal",
+		memberName: "agent1",
+		timestamp: "2025-01-01T00:00:00Z",
+		completedTask: {
+			id: "42",
+			subject: "Test subject",
+			description: "Test desc",
+			owner: "agent1",
+			status: "completed",
+			blocks: [],
+			blockedBy: [],
+			metadata: {},
+			createdAt: "2025-01-01T00:00:00Z",
+			updatedAt: "2025-01-01T00:00:00Z",
+		},
+	});
+	const validResult = parseHookContextSafe(JSON.stringify(validPayload));
+	assert(validResult.ok === true, "parseHookContextSafe accepts valid v1 payload");
+	if (validResult.ok) {
+		assertEq(validResult.payload.version, HOOK_CONTRACT_VERSION, "parsed payload version matches");
+		assertEq(validResult.payload.event, "task_completed", "parsed payload event correct");
+		assertEq(validResult.payload.task?.id, "42", "parsed payload task.id correct");
+		assertEq(validResult.versionCheck.status, "compatible", "parsed payload version check is compatible");
+	}
+
+	// Payload with additive fields (simulates future v2 with extra fields)
+	const additivePayload = {
+		...validPayload,
+		version: HOOK_CONTRACT_VERSION + 1,
+		newFutureField: "should be tolerated",
+		team: { ...validPayload.team, newTeamField: true },
+	};
+	const additiveResult = parseHookContextSafe(JSON.stringify(additivePayload));
+	assert(additiveResult.ok === true, "parseHookContextSafe accepts payload with additive fields");
+	if (additiveResult.ok) {
+		assertEq(additiveResult.versionCheck.status, "newer_minor", "additive payload is newer_minor");
+		assertEq(additiveResult.payload.event, "task_completed", "additive payload preserves known fields");
+	}
+
+	// Payload with version 0 → rejected
+	const oldPayload = { ...validPayload, version: 0 };
+	const oldResult = parseHookContextSafe(JSON.stringify(oldPayload));
+	assert(oldResult.ok === false, "parseHookContextSafe rejects version 0");
+	if (!oldResult.ok) {
+		assert(oldResult.versionCheck !== undefined, "rejected payload includes version check");
+		assertEq(oldResult.versionCheck?.status, "unsupported", "version 0 is unsupported in parse");
+	}
+
+	// Invalid JSON → rejected
+	const invalidJson = parseHookContextSafe("not json");
+	assert(invalidJson.ok === false, "parseHookContextSafe rejects invalid JSON");
+	if (!invalidJson.ok) {
+		assert(invalidJson.error.includes("parse"), "invalid JSON error mentions parsing");
+	}
+
+	// Missing version field → rejected
+	const noVersion = parseHookContextSafe(JSON.stringify({ event: "idle" }));
+	assert(noVersion.ok === false, "parseHookContextSafe rejects missing version");
+	if (!noVersion.ok) {
+		assert(noVersion.error.includes("version"), "missing version error mentions version");
+	}
+
+	// Non-object JSON → rejected
+	const arrayJson = parseHookContextSafe(JSON.stringify([1, 2, 3]));
+	assert(arrayJson.ok === false, "parseHookContextSafe rejects non-object JSON");
+
+	// String version field → rejected
+	const stringVersion = parseHookContextSafe(JSON.stringify({ ...validPayload, version: "1" }));
+	assert(stringVersion.ok === false, "parseHookContextSafe rejects string version");
+
+	// --- version field in buildHookContextPayload ---
+	const idlePayload = buildHookContextPayload({
+		event: "idle",
+		teamId: "t",
+		teamDir: "/tmp",
+		taskListId: "tl",
+		style: "normal",
+	});
+	assertEq(idlePayload.version, HOOK_CONTRACT_VERSION, "idle payload version matches contract");
+
+	const failedPayload = buildHookContextPayload({
+		event: "task_failed",
+		teamId: "t",
+		teamDir: "/tmp",
+		taskListId: "tl",
+		style: "normal",
+		memberName: "w1",
+		completedTask: {
+			id: "99",
+			subject: "Failed task",
+			description: "",
+			owner: "w1",
+			status: "pending",
+			blocks: [],
+			blockedBy: [],
+			metadata: {},
+			createdAt: "2025-01-01T00:00:00Z",
+			updatedAt: "2025-01-01T00:00:00Z",
+		},
+	});
+	assertEq(failedPayload.version, HOOK_CONTRACT_VERSION, "failed payload version matches contract");
+	assertEq(failedPayload.event, "task_failed", "failed payload event correct");
+	// task_failed events typically have status "pending" (reset before hook)
+	assertEq(failedPayload.task?.status, "pending", "failed payload preserves actual task status");
+
+	// --- contract payload tolerates unknown keys (additive change simulation) ---
+	// Demonstrates that JSON.parse + typed access works with extra fields
+	const futureJson = JSON.stringify({
+		version: HOOK_CONTRACT_VERSION,
+		event: "task_completed",
+		team: { id: "t", dir: "/tmp", taskListId: "tl", style: "normal", newField: 42 },
+		member: "a",
+		timestamp: null,
+		task: null,
+		extraTopLevel: { nested: true },
+	});
+	const futureParsed = parseHookContextSafe(futureJson);
+	assert(futureParsed.ok === true, "payload with unknown keys parses successfully");
+	if (futureParsed.ok) {
+		assertEq(futureParsed.payload.team.id, "t", "known fields survive additive changes");
+		assertEq(futureParsed.versionCheck.status, "compatible", "current version with extra keys is compatible");
+	}
+}
+
 // ── 10. team discovery + attach claims ──────────────────────────────
 console.log("\n10. team discovery + attach claims");
 {
@@ -1202,6 +1385,8 @@ console.log("\n15. docs/help drift guard");
 		assert(readme.includes("PI_TEAMS_HOOKS_FAILURE_ACTION"), "README mentions hook failure action policy");
 		assert(readme.includes("PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK"), "README mentions hook reopen cap policy");
 		assert(readme.includes("PI_TEAMS_HOOK_CONTEXT_JSON"), "README mentions hook context json contract");
+		assert(readme.includes("checkHookContractVersion"), "README mentions version check helper");
+		assert(readme.includes("parseHookContextSafe"), "README mentions safe context parser");
 		assert(!readme.includes("claude-sonnet-4"), "README avoids deprecated leader model examples");
 		assert(readme.includes("task-centric view"), "README mentions panel task-centric view");
 		assert(readme.includes("`t` or `shift+t`"), "README mentions panel task toggle key");
@@ -1214,6 +1399,23 @@ console.log("\n15. docs/help drift guard");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
 		assert(readme.includes("docs/hook-contract.md"), "README references hook contract doc");
+
+		// Hook contract doc drift guard
+		const hookContractPath = path.join(process.cwd(), "docs/hook-contract.md");
+		if (fs.existsSync(hookContractPath)) {
+			const hookDoc = fs.readFileSync(hookContractPath, "utf8");
+			assert(hookDoc.includes("Contract version: 1"), "hook-contract.md documents current version");
+			assert(hookDoc.includes("Additive changes"), "hook-contract.md documents additive change policy");
+			assert(hookDoc.includes("Breaking changes"), "hook-contract.md documents breaking change policy");
+			assert(hookDoc.includes("Version lifecycle"), "hook-contract.md documents version lifecycle");
+			assert(hookDoc.includes("Hook author guidelines"), "hook-contract.md includes hook author guidelines");
+			assert(hookDoc.includes("checkHookContractVersion"), "hook-contract.md documents version check helper");
+			assert(hookDoc.includes("parseHookContextSafe"), "hook-contract.md documents safe context parser");
+			assert(hookDoc.includes("newer_minor"), "hook-contract.md documents newer_minor version status");
+		} else {
+			console.log("  (skipped) docs/hook-contract.md not found");
+		}
+
 		assert(readme.includes("member_status"), "README mentions teams tool member_status action");
 		assert(readme.includes("/team status"), "README mentions /team status command");
 		assert(readme.includes("PI_TEAMS_STALL_THRESHOLD_MS"), "README mentions stall threshold env var");

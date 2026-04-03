@@ -341,7 +341,7 @@ Hooks run with working directory = the **leader session cwd** and receive contex
 - `PI_TEAMS_MEMBER`
 - `PI_TEAMS_TASK_ID`, `PI_TEAMS_TASK_SUBJECT`, `PI_TEAMS_TASK_OWNER`, `PI_TEAMS_TASK_STATUS`
 
-See [`docs/hook-contract.md`](docs/hook-contract.md) for the full versioned contract, JSON schema, and compatibility policy.
+See [`docs/hook-contract.md`](docs/hook-contract.md) for the full versioned contract, JSON schema, compatibility policy, and runtime version helpers (`checkHookContractVersion`, `parseHookContextSafe`).
 
 Hook policy can be controlled by agents at runtime via `teams` tool actions:
 

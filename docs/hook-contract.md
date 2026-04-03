@@ -136,6 +136,11 @@ if (ctx.event === "task_failed") {
 // ✅ Good: check the version for breaking changes
 const version = parseInt(process.env.PI_TEAMS_HOOK_CONTEXT_VERSION, 10);
 if (version > 1) {
+  // Version is newer than what we were written for.
+  // Additive fields are safe to ignore — only bail on major mismatch.
+  console.warn(`Hook context version ${version} is newer than expected (1). Proceeding with best-effort parsing.`);
+}
+if (version < 1) {
   console.error(`Unsupported hook contract version: ${version}`);
   process.exit(1);
 }
@@ -147,6 +152,39 @@ assert(Object.keys(ctx).length === 5); // breaks when fields are added
 // ❌ Bad: unconditionally access task fields
 const subject = ctx.task.subject; // crashes when task is null
 ```
+
+### Runtime version helpers
+
+For hooks written in TypeScript/JavaScript that import from `pi-agent-teams`:
+
+```ts
+import {
+  HOOK_CONTRACT_VERSION,
+  HOOK_CONTRACT_VERSION_MIN,
+  checkHookContractVersion,
+  parseHookContextSafe,
+} from "@tmustier/pi-agent-teams/extensions/teams/hooks.js";
+
+// checkHookContractVersion returns { status, message }
+// status: "compatible" | "newer_minor" | "unsupported"
+const check = checkHookContractVersion(2);
+if (check.status === "unsupported") process.exit(1);
+if (check.status === "newer_minor") console.warn(check.message);
+
+// parseHookContextSafe combines JSON parse + version check
+const result = parseHookContextSafe(process.env.PI_TEAMS_HOOK_CONTEXT_JSON);
+if (!result.ok) {
+  console.error(result.error);
+  process.exit(1);
+}
+const { payload, versionCheck } = result;
+// payload is typed as HookContextPayload; versionCheck.status tells you
+// whether additive fields may be present ("newer_minor").
+```
+
+These helpers are optional — hooks may be plain shell scripts or standalone
+programs that parse the JSON directly. The version check logic is intentionally
+simple enough to reimplement in any language.
 
 ## Hook log format
 

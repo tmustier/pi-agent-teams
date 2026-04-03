@@ -5,10 +5,34 @@ import { getTeamsHooksDir } from "./paths.js";
 import type { TeamTask } from "./task-store.js";
 
 /**
- * Hook contract version. Increment on breaking changes only.
- * See docs/hook-contract.md for the full compatibility policy.
+ * Hook contract version. Increment on **breaking** changes only.
+ *
+ * Evolution rules (codified from docs/hook-contract.md):
+ *
+ *   Additive (no bump):
+ *     - New optional fields in context JSON
+ *     - New environment variables
+ *     - New event types
+ *     - New metadata keys
+ *     - Increasing truncation limits
+ *
+ *   Breaking (bump required):
+ *     - Removing / renaming existing JSON fields
+ *     - Changing a field's type or semantics
+ *     - Reducing truncation limits below current values
+ *     - Changing exit-code semantics
+ *     - Removing environment variables
+ *
+ * When bumping: keep the previous version supported for at least one minor
+ * release, emit a deprecation warning, then remove in the next major.
  */
 export const HOOK_CONTRACT_VERSION = 1;
+
+/**
+ * Minimum contract version this runtime supports.
+ * Used by `checkHookContractVersion` to validate version values.
+ */
+export const HOOK_CONTRACT_VERSION_MIN = 1;
 
 export type TeamsHookEvent = "idle" | "task_completed" | "task_failed";
 
@@ -73,6 +97,102 @@ export type TeamsHookRunResult = {
 	/** The contract version used for this invocation. */
 	contractVersion: typeof HOOK_CONTRACT_VERSION;
 };
+
+/**
+ * Result of checking a hook contract version against this runtime's range.
+ *
+ * - `compatible`: version is within the supported range
+ * - `newer_minor`: version has the same major but is newer (additive fields OK)
+ * - `unsupported`: version is outside the supported range (breaking mismatch)
+ */
+export type HookVersionCheckResult = {
+	status: "compatible" | "newer_minor" | "unsupported";
+	requestedVersion: number;
+	currentVersion: typeof HOOK_CONTRACT_VERSION;
+	minVersion: typeof HOOK_CONTRACT_VERSION_MIN;
+	message: string;
+};
+
+/**
+ * Check whether a requested hook contract version is compatible with this
+ * runtime. Hook authors should call this to fail fast on breaking mismatches
+ * and tolerate additive changes.
+ *
+ * Rules:
+ * - `version < HOOK_CONTRACT_VERSION_MIN` → unsupported (too old)
+ * - `version === HOOK_CONTRACT_VERSION`   → compatible (exact match)
+ * - `version > HOOK_CONTRACT_VERSION`     → newer_minor (unknown additive
+ *   fields may appear; hooks written defensively will still work)
+ * - `version` between min and current     → compatible (within range)
+ *
+ * Hooks should treat `newer_minor` as a warning, not a hard failure.
+ */
+export function checkHookContractVersion(version: number): HookVersionCheckResult {
+	if (!Number.isInteger(version) || version < HOOK_CONTRACT_VERSION_MIN) {
+		return {
+			status: "unsupported",
+			requestedVersion: version,
+			currentVersion: HOOK_CONTRACT_VERSION,
+			minVersion: HOOK_CONTRACT_VERSION_MIN,
+			message: `Hook contract version ${version} is below the minimum supported version ${HOOK_CONTRACT_VERSION_MIN}. Update your hook script.`,
+		};
+	}
+	if (version > HOOK_CONTRACT_VERSION) {
+		return {
+			status: "newer_minor",
+			requestedVersion: version,
+			currentVersion: HOOK_CONTRACT_VERSION,
+			minVersion: HOOK_CONTRACT_VERSION_MIN,
+			message: `Hook contract version ${version} is newer than the current runtime version ${HOOK_CONTRACT_VERSION}. Additive fields may appear; ensure your hook tolerates unknown keys.`,
+		};
+	}
+	return {
+		status: "compatible",
+		requestedVersion: version,
+		currentVersion: HOOK_CONTRACT_VERSION,
+		minVersion: HOOK_CONTRACT_VERSION_MIN,
+		message: `Hook contract version ${version} is compatible with runtime version ${HOOK_CONTRACT_VERSION}.`,
+	};
+}
+
+/**
+ * Safely parse `PI_TEAMS_HOOK_CONTEXT_JSON` from environment, validate the
+ * version field, and return a typed result. This is the recommended entry
+ * point for hook scripts that want version-aware parsing.
+ *
+ * Returns `{ ok: true, payload, versionCheck }` on success (including
+ * `newer_minor`), or `{ ok: false, error, versionCheck? }` on failure.
+ */
+export function parseHookContextSafe(json: string): {
+	ok: true;
+	payload: HookContextPayload;
+	versionCheck: HookVersionCheckResult;
+} | {
+	ok: false;
+	error: string;
+	versionCheck?: HookVersionCheckResult;
+} {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(json);
+	} catch {
+		return { ok: false, error: "Failed to parse PI_TEAMS_HOOK_CONTEXT_JSON as JSON." };
+	}
+	if (typeof parsed !== "object" || parsed === null) {
+		return { ok: false, error: "PI_TEAMS_HOOK_CONTEXT_JSON is not a JSON object." };
+	}
+	const obj = parsed as Record<string, unknown>;
+	if (typeof obj.version !== "number") {
+		return { ok: false, error: "Missing or non-numeric 'version' field in hook context JSON." };
+	}
+	const versionCheck = checkHookContractVersion(obj.version);
+	if (versionCheck.status === "unsupported") {
+		return { ok: false, error: versionCheck.message, versionCheck };
+	}
+	// For compatible and newer_minor: return the payload.
+	// The caller tolerates unknown keys (per contract policy).
+	return { ok: true, payload: parsed as HookContextPayload, versionCheck };
+}
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 	return typeof err === "object" && err !== null && "code" in err;
