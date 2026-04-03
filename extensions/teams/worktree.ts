@@ -244,3 +244,22 @@ export async function cleanupWorktrees(opts: {
 
 	return { removedWorktrees, removedBranches, warnings };
 }
+
+/**
+ * Run `git worktree prune` on a repo to clean up stale `.git/worktrees/` entries
+ * left behind by deleted worktree directories (e.g. from crash, manual deletion,
+ * or partial cleanup).
+ *
+ * This is a lightweight, standalone operation safe to call on every startup.
+ * It only removes bookkeeping entries whose on-disk worktree directories no longer exist.
+ */
+export async function pruneStaleWorktreeRefs(repoCwd: string): Promise<{ pruned: boolean; warning?: string }> {
+	try {
+		const toplevel = (await execGit(["rev-parse", "--show-toplevel"], { cwd: repoCwd })).stdout.trim();
+		if (!toplevel) return { pruned: false };
+		await execGit(["worktree", "prune"], { cwd: toplevel, timeoutMs: 15_000 });
+		return { pruned: true };
+	} catch {
+		return { pruned: false, warning: "git worktree prune failed (non-fatal)" };
+	}
+}
