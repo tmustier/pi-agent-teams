@@ -12,7 +12,7 @@ import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type T
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { assessAttachClaimFreshness, heartbeatTeamAttachClaim, readTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
 import { cleanupTeamDir, gcStaleTeamDirs } from "./cleanup.js";
-import { ensureWorktreeCwd, cleanupWorktrees } from "./worktree.js";
+import { ensureWorktreeCwd, cleanupWorktrees, pruneStaleWorktreeRefs } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
 import { isTeamDone } from "./teams-ui-shared.js";
@@ -115,8 +115,11 @@ async function createSessionForTeammate(
 	}
 }
 
-/** Check if a team dir has any task files across all task-list namespaces. */
-async function teamDirHasAnyTasks(teamDir: string): Promise<boolean> {
+/**
+ * Check if a team dir has any pending or in-progress tasks (i.e. active work remaining).
+ * Returns false when the team has no tasks at all, or only completed tasks.
+ */
+async function teamDirHasActiveTasks(teamDir: string): Promise<boolean> {
 	const tasksDir = path.join(teamDir, "tasks");
 	let taskListDirs: string[];
 	try {
@@ -130,7 +133,23 @@ async function teamDirHasAnyTasks(teamDir: string): Promise<boolean> {
 			const stat = await fs.promises.stat(listPath);
 			if (!stat.isDirectory()) continue;
 			const files = await fs.promises.readdir(listPath);
-			if (files.some((f) => f.endsWith(".json") && !f.startsWith("."))) return true;
+			for (const f of files) {
+				if (!f.endsWith(".json") || f.startsWith(".")) continue;
+				try {
+					const raw = await fs.promises.readFile(path.join(listPath, f), "utf8");
+					const parsed: unknown = JSON.parse(raw);
+					if (
+						typeof parsed === "object" &&
+						parsed !== null &&
+						"status" in parsed &&
+						(parsed as Record<string, unknown>).status !== "completed"
+					) {
+						return true;
+					}
+				} catch {
+					// Unreadable task file — skip.
+				}
+			}
 		} catch {
 			continue;
 		}
@@ -746,11 +765,20 @@ export function runLeader(pi: ExtensionAPI): void {
 		});
 
 		// Startup GC: silently remove stale team directories from previous sessions (24h age floor).
+		// Pass repoCwd so cleanupWorktrees can find the repo root even when worktree dirs are gone.
 		void gcStaleTeamDirs({
 			teamsRootDir: getTeamsRootDir(),
 			maxAgeMs: 24 * 60 * 60 * 1000,
+			repoCwd: ctx.cwd,
 			excludeTeamIds: new Set([currentTeamId]),
 		}).catch(() => {
+			// Best-effort; never block the session.
+		});
+
+		// Standalone prune: clean up dangling .git/worktrees/ entries from sessions whose
+		// team directories were already deleted (crash, manual rm, partial cleanup).
+		// Lightweight — only removes bookkeeping for worktree dirs that no longer exist.
+		void pruneStaleWorktreeRefs(ctx.cwd).catch(() => {
 			// Best-effort; never block the session.
 		});
 
@@ -863,7 +891,6 @@ export function runLeader(pi: ExtensionAPI): void {
 		if (!currentCtx) return;
 		await releaseActiveAttachClaim(currentCtx);
 		stopLoops();
-		const hadTeammates = teammates.size > 0;
 		const strings = getTeamsStrings(style);
 		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
 
@@ -878,28 +905,26 @@ export function runLeader(pi: ExtensionAPI): void {
 				// Best-effort — don't block shutdown.
 			}
 
-			// Exit cleanup: delete own team directory if it's empty.
-			// Conservative: only if no RPC teammates were active, no online workers in
-			// config (manual/tmux), no tasks in ANY namespace, and no fresh attach claim.
-			// (Dirs with completed tasks are left for the 24h startup GC — intentionally
-			// asymmetric for safety.)
-			if (!hadTeammates) {
-				try {
-					const claim = await readTeamAttachClaim(teamDir);
-					const claimIsLive = claim !== null && !assessAttachClaimFreshness(claim).isStale;
-					if (claimIsLive) {
-						// Another session is using this team — don't delete.
-					} else {
-						// Also check config for online non-lead members (manual/tmux workers).
-						const cfg = await loadTeamConfig(teamDir);
-						const hasOnlineWorkers = cfg?.members.some((m) => m.role !== "lead" && m.status === "online") ?? false;
-						if (!hasOnlineWorkers && !(await teamDirHasAnyTasks(teamDir))) {
-							await cleanupTeamDir(getTeamsRootDir(), teamDir);
-						}
+			// Exit cleanup: delete own team directory when safe.
+			// Safe = no live attach claim, no online non-lead workers, and no active
+			// (pending/in-progress) tasks.  Dirs with only completed tasks are cleaned
+			// up here rather than deferred to the 24h startup GC — completed tasks have
+			// already been reported back and serve no ongoing purpose.
+			try {
+				const claim = await readTeamAttachClaim(teamDir);
+				const claimIsLive = claim !== null && !assessAttachClaimFreshness(claim).isStale;
+				if (!claimIsLive) {
+					const cfg = await loadTeamConfig(teamDir);
+					const hasOnlineWorkers = cfg?.members.some((m) => m.role !== "lead" && m.status === "online") ?? false;
+					if (!hasOnlineWorkers && !(await teamDirHasActiveTasks(teamDir))) {
+						await cleanupTeamDir(getTeamsRootDir(), teamDir, {
+							teamId: currentTeamId,
+							repoCwd: currentCtx.cwd,
+						});
 					}
-				} catch {
-					// Best-effort; never block shutdown.
 				}
+			} catch {
+				// Best-effort; never block shutdown.
 			}
 		}
 	});
