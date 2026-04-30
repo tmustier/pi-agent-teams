@@ -8,6 +8,34 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 	return typeof err === "object" && err !== null && "code" in err;
 }
 
+/**
+ * Check if a process with the given PID is alive.
+ * Returns true if the process exists (even if zombie), false otherwise.
+ */
+function isPidAlive(pid: number): boolean {
+	try {
+		// signal 0 = existence check, does not actually send a signal
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Read the PID from an existing lock file. Returns null if file doesn't exist
+ * or content is not valid JSON with a numeric pid field.
+ */
+function readLockPid(lockFilePath: string): number | null {
+	try {
+		const data = fs.readFileSync(lockFilePath, "utf8");
+		const parsed = JSON.parse(data);
+		return typeof parsed.pid === "number" ? parsed.pid : null;
+	} catch {
+		return null;
+	}
+}
+
 export interface LockOptions {
 	/** How long to wait to acquire the lock before failing. */
 	timeoutMs?: number;
@@ -19,6 +47,20 @@ export interface LockOptions {
 	label?: string;
 }
 
+/**
+ * Acquire an exclusive file lock and run `fn`.
+ *
+ * Staleness is determined by TWO heuristics (either triggers cleanup):
+ *   1. The lock file's mtime exceeds `staleMs` (default 60s).
+ *   2. The PID recorded in the lock file is no longer alive.
+ *
+ * To avoid the thundering-herd problem where multiple processes all unlink
+ * the same stale lock and then race to re-create it, we use rename-based
+ * atomic replacement: each contender renames the stale lock to a unique
+ * temp path. Only the process that successfully renamed it proceeds to
+ * create a new lock; others see the lock is gone and loop back to try
+ * `openSync("wx")`.
+ */
 export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, opts: LockOptions = {}): Promise<T> {
 	const timeoutMs = opts.timeoutMs ?? 10_000;
 	const staleMs = opts.staleMs ?? 60_000;
@@ -41,22 +83,41 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 		} catch (err: unknown) {
 			if (!isErrnoException(err) || err.code !== "EEXIST") throw err;
 
-			// Stale lock handling
+			// Stale lock handling — use atomic rename to avoid thundering herd
 			try {
 				const st = fs.statSync(lockFilePath);
 				const age = Date.now() - st.mtimeMs;
-				if (age > staleMs) {
-					fs.unlinkSync(lockFilePath);
+				const lockPid = readLockPid(lockFilePath);
+				const pidDead = lockPid !== null && lockPid !== process.pid && !isPidAlive(lockPid);
+
+				if (age > staleMs || pidDead) {
+					// Atomically steal the lock by renaming it to a unique temp path.
+					// Only one contender will succeed at the rename; others will get ENOENT.
+					const trashPath = `${lockFilePath}.stale.${process.pid}.${Date.now()}`;
+					fs.renameSync(lockFilePath, trashPath);
+					// Clean up the trash asynchronously — don't block the lock acquisition
+					try { fs.unlinkSync(trashPath); } catch { /* best effort */ }
 					attempt = 0;
 					continue;
 				}
-			} catch {
-				// ignore: stat/unlink failures fall through to wait
+			} catch (err2: unknown) {
+				// ENOENT means another contender already stole it — loop back immediately
+				if (isErrnoException(err2) && (err2 as NodeJS.ErrnoException).code === "ENOENT") {
+					attempt = 0;
+					continue;
+				}
+				// Other stat/rename/read failures fall through to wait
 			}
 
 			const elapsedMs = Date.now() - start;
 			if (elapsedMs > timeoutMs) {
-				throw new Error(`Timeout acquiring lock: ${lockFilePath}`);
+				// Include diagnostic info in the error for easier debugging
+				const lockPid = readLockPid(lockFilePath);
+				const pidInfo = lockPid !== null ? ` (held by PID ${lockPid}, alive=${isPidAlive(lockPid)})` : "";
+				throw new Error(
+					`Timeout acquiring lock: ${lockFilePath}${pidInfo}. ` +
+					`If the lock is stale, delete it manually: rm -f ${lockFilePath}`,
+				);
 			}
 
 			attempt += 1;
