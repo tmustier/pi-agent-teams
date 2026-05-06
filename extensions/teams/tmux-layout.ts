@@ -73,9 +73,11 @@ function chooseLargestPane(panes: readonly TmuxPaneInfo[]): TmuxPaneInfo | null 
 	return best;
 }
 
-function splitFlagForPane(pane: TmuxPaneInfo | null, targetIsLeader: boolean): "-h" | "-v" {
-	if (targetIsLeader || !pane) return "-h";
-	return pane.width >= pane.height * 2 ? "-h" : "-v";
+function splitFlagForTarget(targetIsLeader: boolean): "-h" | "-v" {
+	// Keep the leader as one large pane on the left. The first worker is created
+	// by splitting the leader left/right; all later workers split the worker
+	// column top/bottom so the right side stacks horizontally-divided panes.
+	return targetIsLeader ? "-h" : "-v";
 }
 
 async function resizeLeaderPane(ctx: TmuxContext, env: NodeJS.ProcessEnv): Promise<void> {
@@ -110,7 +112,7 @@ export async function spawnWorkerPane(opts: {
 	const targetPane = liveWorkerPanes.length > 0 ? chooseLargestPane(liveWorkerPanes) : paneById.get(opts.ctx.leaderPaneId) ?? null;
 	const targetPaneId = targetPane?.paneId ?? opts.ctx.leaderPaneId;
 	const targetIsLeader = targetPaneId === opts.ctx.leaderPaneId;
-	const splitFlag = splitFlagForPane(targetPane, targetIsLeader);
+	const splitFlag = splitFlagForTarget(targetIsLeader);
 
 	const paneId = await tmux([
 		"split-window",
