@@ -317,16 +317,36 @@ export class TranscriptTracker {
 
 type TrackedEventType = "tool_execution_start" | "tool_execution_end" | "agent_end" | "message_end";
 
+export interface UsageBreakdown {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
 export interface TeammateActivity {
 	toolUseCount: number;
 	currentToolName: string | null;
 	lastToolName: string | null;
 	turnCount: number;
+	/** Back-compat aggregate from provider usage.totalTokens; includes cache reads/writes for some providers. */
 	totalTokens: number;
+	/** Pi-like cumulative usage components for clearer display. */
+	usage: UsageBreakdown;
 	recentEvents: Array<{ type: TrackedEventType; toolName?: string; timestamp: number }>;
 }
 
 const MAX_RECENT = 10;
+
+function emptyUsage(): UsageBreakdown {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+}
+
+function numberField(obj: Record<string, unknown>, key: string): number {
+	const v = obj[key];
+	return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
 
 function emptyActivity(): TeammateActivity {
 	return {
@@ -335,6 +355,7 @@ function emptyActivity(): TeammateActivity {
 		lastToolName: null,
 		turnCount: 0,
 		totalTokens: 0,
+		usage: emptyUsage(),
 		recentEvents: [],
 	};
 }
@@ -376,7 +397,13 @@ export class ActivityTracker {
 			const usage = msg.usage;
 			if (!isRecord(usage)) return;
 			const totalTokens = usage.totalTokens;
-			if (typeof totalTokens === "number") a.totalTokens += totalTokens;
+			if (typeof totalTokens === "number" && Number.isFinite(totalTokens)) a.totalTokens += totalTokens;
+			a.usage.input += numberField(usage, "input");
+			a.usage.output += numberField(usage, "output");
+			a.usage.cacheRead += numberField(usage, "cacheRead");
+			a.usage.cacheWrite += numberField(usage, "cacheWrite");
+			const cost = usage.cost;
+			if (isRecord(cost)) a.usage.cost += numberField(cost, "total");
 		}
 	}
 

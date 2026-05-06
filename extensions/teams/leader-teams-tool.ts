@@ -38,7 +38,7 @@ import {
 	resolveDisplayStatus,
 	formatElapsed,
 	lastMessageSummary,
-	formatTokens,
+	formatUsageBreakdown,
 	toolActivity,
 } from "./teams-ui-shared.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
@@ -243,7 +243,7 @@ export function registerTeamsTool(opts: {
 		description: [
 			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
 			"You can also mutate existing tasks (assign, unassign, set status, dependencies), send team messages, run teammate lifecycle actions, and manage hooks/model policy without user slash commands.",
-			"Use member_status (with optional name) to get real-time worker state: activity, time in state, stall detection, tool use, tokens, and last message summary.",
+			"Use member_status (with optional name) to get real-time worker state: activity, time in state, stall detection, tool use, Pi-like usage breakdown, and last message summary.",
 			"Use team_done to end a team run when all tasks are complete (stops teammates, hides widget).",
 			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
@@ -649,7 +649,8 @@ export function registerTeamsTool(opts: {
 						const msgPreview = lastMessageSummary(rpc, 80);
 						const model = memberCfg?.meta?.["model"];
 
-						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${currentTool ? ` (${currentTool})` : ""} · ${formatTokens(activity.totalTokens)} tokens`);
+						const usage = formatUsageBreakdown(activity.usage, { fallbackTotal: activity.totalTokens });
+						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${currentTool ? ` (${currentTool})` : ""} · ${usage}`);
 						if (msgPreview) lines.push(`  last: ${msgPreview}`);
 
 						workers.push({
@@ -662,6 +663,8 @@ export function registerTeamsTool(opts: {
 							toolUseCount: activity.toolUseCount,
 							turnCount: activity.turnCount,
 							totalTokens: activity.totalTokens,
+							usage: activity.usage,
+							usageSummary: usage,
 							model: typeof model === "string" ? model : undefined,
 						});
 					}
@@ -700,7 +703,7 @@ export function registerTeamsTool(opts: {
 					`time in state: ${elapsed || "(unknown)"}`,
 					`last event: ${noEventFor || "(unknown)"} ago`,
 					`current activity: ${currentTool || "(none)"}`,
-					`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
+					`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · usage: ${formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens })}`,
 				];
 				if (typeof model === "string" && model) lines.push(`model: ${model}`);
 				if (cwd) lines.push(`cwd: ${cwd}`);
@@ -725,6 +728,8 @@ export function registerTeamsTool(opts: {
 						toolUseCount: activity.toolUseCount,
 						turnCount: activity.turnCount,
 						totalTokens: activity.totalTokens,
+						usage: activity.usage,
+						usageSummary: formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens }),
 						model: typeof model === "string" ? model : undefined,
 						activeTaskId: activeTask?.id,
 						tasks: {

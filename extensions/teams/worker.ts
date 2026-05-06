@@ -118,6 +118,10 @@ function buildTaskPrompt(style: TeamsStyle, agentName: string, task: TeamTask, p
 }
 
 // Message parsers are shared with the leader implementation.
+function sendWorkerTurnMessage(pi: ExtensionAPI, content: Parameters<ExtensionAPI["sendUserMessage"]>[0]): void {
+	pi.sendUserMessage(content, { deliverAs: "followUp" });
+}
+
 export function runWorker(pi: ExtensionAPI): void {
 	const env = teamDirFromEnv();
 	if (!env) return;
@@ -367,14 +371,15 @@ export function runWorker(pi: ExtensionAPI): void {
 						planApproved = true;
 						planMode = false;
 						planRequestId = null;
-						pi.sendUserMessage("Your plan has been approved. Proceed with implementation.");
+						sendWorkerTurnMessage(pi, "Your plan has been approved. Proceed with implementation.");
 						continue;
 					}
 
 					const planRejection = isPlanRejectedMessage(m.text);
 					if (planRejection && planRequestId && planRejection.requestId === planRequestId) {
 						planRequestId = null;
-						pi.sendUserMessage(
+						sendWorkerTurnMessage(
+							pi,
 							`Your plan was rejected. Feedback: ${planRejection.feedback}\nPlease revise your plan.`,
 						);
 						continue;
@@ -435,7 +440,7 @@ export function runWorker(pi: ExtensionAPI): void {
 
 				currentTaskId = taskId;
 				isStreaming = true; // optimistic; agent_start will follow
-				pi.sendUserMessage(buildTaskPrompt(style, agentName, task, planMode && !planApproved));
+				sendWorkerTurnMessage(pi, buildTaskPrompt(style, agentName, task, planMode && !planApproved));
 				pendingTaskAssignments = [...requeue, ...pendingTaskAssignments];
 				return;
 			}
@@ -446,7 +451,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				const text = pendingDmTexts.join("\n\n---\n\n");
 				pendingDmTexts = [];
 				isStreaming = true;
-				pi.sendUserMessage([
+				sendWorkerTurnMessage(pi, [
 					{ type: "text", text: "You have received comrade message(s):" },
 					{ type: "text", text },
 				]);
@@ -463,7 +468,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				if (claimed) {
 					currentTaskId = claimed.id;
 					isStreaming = true;
-					pi.sendUserMessage(buildTaskPrompt(style, agentName, claimed, planMode && !planApproved));
+					sendWorkerTurnMessage(pi, buildTaskPrompt(style, agentName, claimed, planMode && !planApproved));
 					return;
 				}
 			}

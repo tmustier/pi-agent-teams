@@ -32,7 +32,7 @@ import {
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus, updateTeamHooksPolicy } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
 import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelSelection } from "../extensions/teams/model-policy.js";
-import { getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
+import { formatUsageBreakdown, getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	HOOK_CONTRACT_VERSION,
@@ -45,7 +45,7 @@ import {
 	shouldCreateHookFollowupTask,
 	shouldReopenTaskOnHookFailure,
 } from "../extensions/teams/hooks.js";
-import { TranscriptTracker, type TranscriptEntry } from "../extensions/teams/activity-tracker.js";
+import { ActivityTracker, TranscriptTracker, type TranscriptEntry } from "../extensions/teams/activity-tracker.js";
 import { listDiscoveredTeams } from "../extensions/teams/team-discovery.js";
 import {
 	acquireTeamAttachClaim,
@@ -68,6 +68,7 @@ import {
 	isAbortRequestMessage,
 	isPlanApprovedMessage,
 	isPlanRejectedMessage,
+	taskAssignmentPayload,
 } from "../extensions/teams/protocol.js";
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
 import { planDelegateTeammateNames } from "../extensions/teams/leader-teams-tool.js";
@@ -1737,6 +1738,114 @@ console.log("\n15. worker/leader messaging hardening");
 		}
 	}
 	assertEq(planSetActiveToolsCalls.at(0), [...WORKER_READ_ONLY_PLAN_TOOLS], "plan-required mode keeps communication tools active");
+
+	const waitFor = async (predicate: () => boolean, timeoutMs = 2_000): Promise<boolean> => {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (predicate()) return true;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		return predicate();
+	};
+
+	const workerTurnMessages: Array<{ content: unknown; options?: { deliverAs?: string } }> = [];
+	const turnHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	const turnFakePi = {
+		registerTool() {
+			return undefined;
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			turnHandlers.set(event, handler);
+			return undefined;
+		},
+		sendUserMessage(content: unknown, options?: { deliverAs?: string }) {
+			workerTurnMessages.push({ content, options });
+		},
+	} as unknown as ExtensionAPI;
+	const turnWorkerTeamId = "worker-turn-delivery-team";
+	const turnWorkerTeamDir = path.join(tmpRoot, turnWorkerTeamId);
+	const savedTurnEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedTurnEnv.set(key, process.env[key]);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = turnWorkerTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = turnWorkerTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "dm-worker";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+		await writeToMailbox(turnWorkerTeamDir, TEAM_MAILBOX_NS, "dm-worker", {
+			from: "team-lead",
+			text: "please report status",
+			timestamp: new Date().toISOString(),
+		});
+		runWorker(turnFakePi);
+		await turnHandlers.get("session_start")?.({ type: "session_start" }, {
+			cwd: turnWorkerTeamDir,
+			sessionManager: { getSessionId: () => turnWorkerTeamId, getSessionFile: () => undefined },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assert(await waitFor(() => workerTurnMessages.length > 0), "queued worker DM triggers a worker turn");
+		assertEq(workerTurnMessages.at(0)?.options?.deliverAs, "followUp", "queued worker DM uses followUp delivery");
+		await turnHandlers.get("session_shutdown")?.({ type: "session_shutdown" });
+	} finally {
+		for (const key of envKeys) {
+			const value = savedTurnEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+
+	const taskTurnMessages: Array<{ content: unknown; options?: { deliverAs?: string } }> = [];
+	const taskTurnHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	const taskTurnFakePi = {
+		registerTool() {
+			return undefined;
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			taskTurnHandlers.set(event, handler);
+			return undefined;
+		},
+		sendUserMessage(content: unknown, options?: { deliverAs?: string }) {
+			taskTurnMessages.push({ content, options });
+		},
+	} as unknown as ExtensionAPI;
+	const taskTurnTeamId = "worker-task-delivery-team";
+	const taskTurnTeamDir = path.join(tmpRoot, taskTurnTeamId);
+	const assignedTask = await createTask(taskTurnTeamDir, taskTurnTeamId, {
+		subject: "Check task prompt delivery",
+		description: "Ensure assigned task wakeups use followUp delivery.",
+		owner: "task-worker",
+	});
+	const savedTaskTurnEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedTaskTurnEnv.set(key, process.env[key]);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = taskTurnTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = taskTurnTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "task-worker";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+		await writeToMailbox(taskTurnTeamDir, taskTurnTeamId, "task-worker", {
+			from: "team-lead",
+			text: JSON.stringify(taskAssignmentPayload(assignedTask, "team-lead")),
+			timestamp: new Date().toISOString(),
+		});
+		runWorker(taskTurnFakePi);
+		await taskTurnHandlers.get("session_start")?.({ type: "session_start" }, {
+			cwd: taskTurnTeamDir,
+			sessionManager: { getSessionId: () => taskTurnTeamId, getSessionFile: () => undefined },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assert(await waitFor(() => taskTurnMessages.length > 0), "assigned task triggers a worker turn");
+		assertEq(taskTurnMessages.at(0)?.options?.deliverAs, "followUp", "assigned task prompt uses followUp delivery");
+		await taskTurnHandlers.get("session_shutdown")?.({ type: "session_shutdown" });
+	} finally {
+		for (const key of envKeys) {
+			const value = savedTaskTurnEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 }
 
 // ── 16. docs/help drift guard ────────────────────────────────────────
@@ -1993,6 +2102,37 @@ console.log("\n16. docs/help drift guard");
 			assert(e.summary !== null && e.summary.endsWith("…"), "truncated summary ends with ellipsis");
 		}
 	}
+}
+
+// ── 12b. activity tracker usage breakdown ───────────────────────────
+{
+	console.log(`\n12b. activity tracker usage breakdown`);
+	const tracker = new ActivityTracker();
+	tracker.handleEvent("alice", {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			usage: {
+				input: 55_000,
+				output: 3_800,
+				cacheRead: 794_000,
+				cacheWrite: 0,
+				totalTokens: 852_800,
+				cost: { input: 0.2, output: 0.5, cacheRead: 0.086, cacheWrite: 0, total: 0.786 },
+			},
+		},
+	} as never);
+	const activity = tracker.get("alice");
+	assertEq(activity.totalTokens, 852_800, "activity keeps backward-compatible provider totalTokens");
+	assertEq(activity.usage.input, 55_000, "activity tracks input usage");
+	assertEq(activity.usage.output, 3_800, "activity tracks output usage");
+	assertEq(activity.usage.cacheRead, 794_000, "activity tracks cache-read usage separately");
+	assertEq(activity.usage.cost, 0.786, "activity tracks total cost");
+	assertEq(
+		formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens }),
+		"↑55.0k ↓3.8k R794.0k $0.786",
+		"usage breakdown display mirrors Pi footer instead of one cache-inclusive token total",
+	);
 }
 
 // ── 13. tmux worker live session activity bridge ────────────────────

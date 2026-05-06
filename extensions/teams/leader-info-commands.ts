@@ -5,7 +5,7 @@ import type { TeammateHandle } from "./teammate-rpc.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
-import { resolveDisplayStatus, formatElapsed, formatTokens, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
+import { resolveDisplayStatus, formatElapsed, formatUsageBreakdown, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import { listTasks } from "./task-store.js";
 
@@ -195,7 +195,8 @@ export async function handleTeamStatusCommand(opts: {
 			const tool = toolActivity(activity.currentToolName);
 			const toolTag = tool ? ` (${tool})` : "";
 			const stalledTag = displayStatus === "stalled" ? " ⚠ STALLED" : "";
-			lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${toolTag} · ${formatTokens(activity.totalTokens)} tokens${stalledTag}`);
+			const usage = formatUsageBreakdown(activity.usage, { fallbackTotal: activity.totalTokens });
+			lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${toolTag} · ${usage}${stalledTag}`);
 		}
 		ctx.ui.notify(lines.join("\n"), "info");
 		return;
@@ -227,7 +228,7 @@ export async function handleTeamStatusCommand(opts: {
 		`time in state: ${elapsed || "(unknown)"}`,
 		`last event: ${noEventFor || "(unknown)"} ago`,
 		`current activity: ${currentTool || "(none)"}`,
-		`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
+		`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · usage: ${formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens })}`,
 	];
 	if (typeof model === "string" && model) lines.push(`model: ${model}`);
 	if (cwd) lines.push(`cwd: ${cwd}`);

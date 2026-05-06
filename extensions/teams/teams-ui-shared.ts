@@ -141,6 +141,36 @@ export function formatTokens(n: number): string {
 	return String(n);
 }
 
+export type UsageBreakdownLike = {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+};
+
+export function addUsageBreakdown(a: UsageBreakdownLike, b: UsageBreakdownLike): UsageBreakdownLike {
+	return {
+		input: a.input + b.input,
+		output: a.output + b.output,
+		cacheRead: a.cacheRead + b.cacheRead,
+		cacheWrite: a.cacheWrite + b.cacheWrite,
+		cost: a.cost + b.cost,
+	};
+}
+
+export function formatUsageBreakdown(usage: UsageBreakdownLike, opts: { includeCost?: boolean; fallbackTotal?: number } = {}): string {
+	const parts: string[] = [];
+	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
+	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
+	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
+	if (opts.includeCost && usage.cost) parts.push(`$${usage.cost.toFixed(3)}`);
+	if (parts.length > 0) return parts.join(" ");
+	if (opts.fallbackTotal && opts.fallbackTotal > 0) return `${formatTokens(opts.fallbackTotal)} total`;
+	return "0";
+}
+
 /**
  * Check if all tasks are completed and all teammates are idle/stopped.
  * Used by the widget (done hint) and leader (auto-done detection).
