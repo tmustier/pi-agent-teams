@@ -79,9 +79,11 @@ import { runWorker } from "../extensions/teams/worker.js";
 import { buildWorkerToolAllowlist, WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "../extensions/teams/worker-tools.js";
 import { TeammateRpc, type TeammateHandle } from "../extensions/teams/teammate-rpc.js";
 import { TeammateTmux } from "../extensions/teams/teammate-tmux.js";
+import { spawnWorkerPane, type TmuxContext, type TmuxExecutor } from "../extensions/teams/tmux-layout.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getTeamDir, validateTeamId } from "../extensions/teams/paths.js";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -124,6 +126,32 @@ assertEq(sanitizeName("Hello World!"), "Hello-World-", "non-alnum → hyphens");
 assertEq(sanitizeName("agent_1"), "agent_1", "underscores kept");
 assertEq(sanitizeName(""), "", "empty stays empty");
 assertEq(sanitizeName("UPPER"), "UPPER", "case preserved");
+
+// ── 1a. team path validation ────────────────────────────────────────
+console.log("\n1a. team path validation");
+{
+	const oldRoot = process.env.PI_TEAMS_ROOT_DIR;
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teams-root-smoke-"));
+	process.env.PI_TEAMS_ROOT_DIR = root;
+	try {
+		assertEq(validateTeamId("safe-team_123"), null, "validateTeamId accepts safe team ids");
+		assert(validateTeamId("../escape")?.includes("traversal") ?? false, "validateTeamId rejects traversal segments");
+		assert(validateTeamId("nested/team")?.includes("path separators") ?? false, "validateTeamId rejects slash separators");
+		assert(validateTeamId(" nested ")?.includes("whitespace") ?? false, "validateTeamId rejects leading/trailing whitespace");
+		assert(validateTeamId(path.resolve(root, "abs"))?.includes("path separators") ?? false, "validateTeamId rejects absolute paths");
+		let threw = false;
+		try {
+			getTeamDir("../escape");
+		} catch (err: unknown) {
+			threw = err instanceof Error && err.message.includes("Invalid teamId");
+		}
+		assert(threw, "getTeamDir refuses traversal teamId");
+		assertEq(getTeamDir("safe-team_123"), path.join(root, "safe-team_123"), "getTeamDir keeps safe ids under teams root");
+	} finally {
+		if (oldRoot === undefined) delete process.env.PI_TEAMS_ROOT_DIR;
+		else process.env.PI_TEAMS_ROOT_DIR = oldRoot;
+	}
+}
 
 // ── 1b. model policy ────────────────────────────────────────────────
 console.log("\n1b. model-policy");
@@ -293,6 +321,47 @@ console.log("\n2. fs-lock.withLock");
 	assert(!fs.existsSync(lockFile), "contended lock cleaned up after");
 }
 
+{
+	// A live holder must not be stolen just because staleMs has elapsed; otherwise two writers can enter.
+	const lockFile = path.join(tmpRoot, "live-holder.lock");
+	const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+	let holderEntered = false;
+	let activeHolders = 0;
+	let overlapDetected = false;
+
+	const holder = withLock(
+		lockFile,
+		async () => {
+			holderEntered = true;
+			activeHolders += 1;
+			await sleep(450);
+			activeHolders -= 1;
+		},
+		{ staleMs: 120, pollMs: 10, timeoutMs: 2_000, label: "live-holder" },
+	);
+	while (!holderEntered) await sleep(5);
+	await sleep(180);
+
+	let timedOut = false;
+	try {
+		await withLock(
+			lockFile,
+			async () => {
+				overlapDetected = activeHolders > 0;
+				return "stolen";
+			},
+			{ staleMs: 120, pollMs: 10, timeoutMs: 90, label: "contender" },
+		);
+	} catch (err: unknown) {
+		timedOut = err instanceof Error && err.message.includes("Timeout acquiring lock");
+	}
+	assert(timedOut, "withLock does not steal a stale-aged lock from a live holder");
+	assert(!overlapDetected, "withLock never overlaps live holder critical sections");
+	await holder;
+	const recovered = await withLock(lockFile, async () => "after-live", { staleMs: 120, pollMs: 10, timeoutMs: 500 });
+	assertEq(recovered, "after-live", "withLock can acquire after live holder releases");
+}
+
 // ── 3. mailbox ───────────────────────────────────────────────────────
 console.log("\n3. mailbox");
 {
@@ -417,9 +486,15 @@ console.log("\n4. task-store");
 	assertEq(t2after?.owner, "agent2", "startAssignedTask preserves owner");
 
 	// completeTask
-	await completeTask(teamDir, taskListId, t1.id, "agent1", "All tests passing");
+	const t1Complete = await completeTask(teamDir, taskListId, t1.id, "agent1", "All tests passing");
+	assert(t1Complete.ok, "completeTask reports success for owner");
 	const t1done = await getTask(teamDir, taskListId, t1.id);
 	assertEq(t1done?.status, "completed", "completeTask sets completed");
+	assertEq(t1done?.metadata?.["result"], "All tests passing", "completeTask stores owner result");
+	const t1Duplicate = await completeTask(teamDir, taskListId, t1.id, "agent1", "duplicate must not overwrite");
+	assert(!t1Duplicate.ok && t1Duplicate.reason === "already_completed", "completeTask rejects duplicate completion as already_completed");
+	const t1AfterDuplicate = await getTask(teamDir, taskListId, t1.id);
+	assertEq(t1AfterDuplicate?.metadata?.["result"], "All tests passing", "duplicate completion does not overwrite result");
 
 	// formatTaskLine
 	assert(t1done !== null, "completed task can be re-fetched");
@@ -438,6 +513,54 @@ console.log("\n4. task-store");
 	assert(claimed !== null, "claimNextAvailableTask finds a task");
 	assertEq(claimed?.owner, "agent3", "claimed task now owned by agent3");
 
+	// completion after reassignment/unassign must not accept stale workers or stale results.
+	const reassigned = await createTask(teamDir, taskListId, {
+		subject: "Reassigned task",
+		description: "old owner must not complete after reassignment",
+		owner: "old-owner",
+	});
+	await startAssignedTask(teamDir, taskListId, reassigned.id, "old-owner");
+	await updateTask(teamDir, taskListId, reassigned.id, (cur) => ({
+		...cur,
+		owner: "new-owner",
+		status: "in_progress",
+		metadata: { ...(cur.metadata ?? {}), reassignedForSmoke: true },
+	}));
+	const staleComplete = await completeTask(teamDir, taskListId, reassigned.id, "old-owner", "old result must not be stored");
+	assert(!staleComplete.ok && staleComplete.reason === "not_owner", "completeTask rejects stale owner after reassignment");
+	assertEq((await getTask(teamDir, taskListId, reassigned.id))?.metadata?.["result"], undefined, "stale owner result is not persisted");
+	const newOwnerComplete = await completeTask(teamDir, taskListId, reassigned.id, "new-owner", "new owner result");
+	assert(newOwnerComplete.ok, "completeTask accepts current owner after reassignment");
+	assertEq((await getTask(teamDir, taskListId, reassigned.id))?.metadata?.["result"], "new owner result", "current owner result is persisted");
+
+	const unassignedCompletion = await createTask(teamDir, taskListId, {
+		subject: "Unassigned before completion",
+		description: "old owner must not complete after unassign",
+		owner: "temp-owner",
+	});
+	await startAssignedTask(teamDir, taskListId, unassignedCompletion.id, "temp-owner");
+	const unassignedCount = await unassignTasksForAgent(teamDir, taskListId, "temp-owner", "agent left");
+	assertEq(unassignedCount, 1, "unassignTasksForAgent reports one changed active task");
+	const staleAfterUnassign = await completeTask(teamDir, taskListId, unassignedCompletion.id, "temp-owner", "unassigned result must not be stored");
+	assert(!staleAfterUnassign.ok && staleAfterUnassign.reason === "not_owner", "completeTask rejects owner after unassign");
+	const unassignedFetched = await getTask(teamDir, taskListId, unassignedCompletion.id);
+	assertEq(unassignedFetched?.status, "pending", "unassignTasksForAgent resets active task to pending");
+	assertEq(unassignedFetched?.owner, undefined, "unassignTasksForAgent clears active task owner");
+	assertEq(unassignedFetched?.metadata?.["result"], undefined, "unassigned stale completion result is not stored");
+
+	const completedStillOwned = await createTask(teamDir, taskListId, {
+		subject: "Completed task stays completed",
+		description: "unassign must not mutate completed tasks",
+		owner: "done-owner",
+	});
+	await startAssignedTask(teamDir, taskListId, completedStillOwned.id, "done-owner");
+	await completeTask(teamDir, taskListId, completedStillOwned.id, "done-owner", "done result");
+	const completedUnassignCount = await unassignTasksForAgent(teamDir, taskListId, "done-owner", "agent left after completion");
+	const completedAfterUnassign = await getTask(teamDir, taskListId, completedStillOwned.id);
+	assertEq(completedUnassignCount, 0, "unassignTasksForAgent skips completed tasks");
+	assertEq(completedAfterUnassign?.status, "completed", "unassignTasksForAgent leaves completed status intact");
+	assertEq(completedAfterUnassign?.metadata?.["result"], "done result", "unassignTasksForAgent preserves completed result");
+
 	// unassignTasksForAgent — unassigns all non-completed tasks for agent
 	// agent3 claimed a task above, unassign it
 	await unassignTasksForAgent(teamDir, taskListId, "agent3", "agent3 left");
@@ -447,6 +570,16 @@ console.log("\n4. task-store");
 	// dependencies
 	const depRes = await addTaskDependency(teamDir, taskListId, t3.id, t2.id);
 	assert(depRes.ok, "addTaskDependency ok");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [t2.id], "addTaskDependency records blockedBy on dependent");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [t3.id], "addTaskDependency records reverse blocks on dependency");
+	const depResDuplicate = await addTaskDependency(teamDir, taskListId, t3.id, t2.id);
+	assert(depResDuplicate.ok, "addTaskDependency duplicate ok/idempotent");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [t2.id], "duplicate dependency does not duplicate blockedBy");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [t3.id], "duplicate dependency does not duplicate reverse blocks");
+	const missingDep = await addTaskDependency(teamDir, taskListId, t3.id, "missing-dep");
+	assert(!missingDep.ok, "addTaskDependency rejects missing dependency");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [t2.id], "failed dependency add leaves dependent unchanged");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [t3.id], "failed dependency add leaves dependency unchanged");
 	const t3fetched = await getTask(teamDir, taskListId, t3.id);
 	assert(t3fetched !== null, "getTask returns dependency task");
 	const blocked = t3fetched ? await isTaskBlocked(teamDir, taskListId, t3fetched) : false;
@@ -454,6 +587,13 @@ console.log("\n4. task-store");
 
 	const rmDep = await removeTaskDependency(teamDir, taskListId, t3.id, t2.id);
 	assert(rmDep.ok, "removeTaskDependency ok");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [], "removeTaskDependency clears blockedBy on dependent");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [], "removeTaskDependency clears reverse blocks on dependency");
+	const rmDepAgain = await removeTaskDependency(teamDir, taskListId, t3.id, t2.id);
+	assert(rmDepAgain.ok, "removeTaskDependency is idempotent for absent edge");
+	const t3AfterRemove = await getTask(teamDir, taskListId, t3.id);
+	const unblocked = t3AfterRemove ? await isTaskBlocked(teamDir, taskListId, t3AfterRemove) : true;
+	assert(!unblocked, "task is unblocked after dependency removal");
 
 	// clearTasks (completed only)
 	const clearResult = await clearTasks(teamDir, taskListId, "completed");
@@ -1482,6 +1622,44 @@ console.log("\n14. leader-inbox LLM message injection");
 		assert(failMsg.content.includes("health check failed"), "failure LLM message includes partialResult");
 	}
 
+	// Stale/missing failed task IDs should still wake the leader with the worker's reason.
+	const staleFailedTaskId = "9999";
+	const tsStaleFail = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "bob",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "bob",
+			timestamp: tsStaleFail,
+			completedTaskId: staleFailedTaskId,
+			completedStatus: "failed",
+			taskFailureReason: "Task disappeared before completion could be recorded",
+		}),
+		timestamp: tsStaleFail,
+	});
+
+	llmMessages.length = 0;
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+	});
+
+	assert(llmMessages.length === 1, "stale failed completion still sends one LLM notification");
+	const staleFailMsg = llmMessages[0];
+	if (staleFailMsg) {
+		assert(staleFailMsg.content.includes(`task #${staleFailedTaskId}`), "stale failure notification includes missing task id");
+		assert(staleFailMsg.content.includes("Task disappeared"), "stale failure notification includes worker failure reason");
+		assertEq(staleFailMsg.options?.deliverAs, "followUp", "stale failure notification uses followUp delivery");
+	}
+
 	// Test hook-aware allDone qualifier
 	const t3 = await createTask(inboxTeamDir, inboxTaskListId, { subject: "Final task", description: "", owner: "carol" });
 	await completeTask(inboxTeamDir, inboxTaskListId, t3.id, "carol", "Done");
@@ -2244,6 +2422,55 @@ console.log("\n16. docs/help drift guard");
 	assertEq(teammate.status, "idle", "tmux final assistant text marks teammate idle");
 	assert(teammate.lastAssistantText.includes("done"), "tmux final assistant text updates lastAssistantText");
 	assert(teammate.lastEventAt > 0, "tmux live bridge updates lastEventAt");
+}
+
+// ── 14. tmux spawn serialization ───────────────────────────────────
+{
+	console.log(`\n14. tmux spawn serialization`);
+	type SimPane = { paneId: string; width: number; height: number };
+	type CommandRecord = { command: string; args: readonly string[]; paneCount?: number; target?: string };
+	const panes: SimPane[] = [{ paneId: "%0", width: 120, height: 40 }];
+	const records: CommandRecord[] = [];
+	let nextPaneId = 1;
+	const executor: TmuxExecutor = async (args) => {
+		const command = args[0] ?? "";
+		if (command === "list-panes") {
+			records.push({ command, args: [...args], paneCount: panes.length });
+			return panes.map((pane) => `${pane.paneId}\t${pane.width}\t${pane.height}`).join("\n");
+		}
+		if (command === "split-window") {
+			const targetFlagIndex = args.indexOf("-t");
+			const target = targetFlagIndex >= 0 ? args[targetFlagIndex + 1] : undefined;
+			records.push({ command, args: [...args], target });
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			const paneId = `%${nextPaneId}`;
+			nextPaneId++;
+			panes.push({ paneId, width: 60, height: 20 });
+			return paneId;
+		}
+		records.push({ command, args: [...args] });
+		if (command === "display-message") return "120";
+		return "";
+	};
+	const ctx: TmuxContext = { sessionName: "s", windowId: "tmux-spawn-smoke-window", leaderPaneId: "%0" };
+	const env = {
+		PI_TEAMS_TMUX_SPLIT_VERIFY_DELAY_MS: "0",
+		PI_TEAMS_TMUX_SPLIT_VERIFY_TIMEOUT_MS: "0",
+		PI_TEAMS_TMUX_LEADER_WIDTH_PCT: "40",
+	};
+	const [firstPaneId, secondPaneId] = await Promise.all([
+		spawnWorkerPane({ ctx, command: "worker-1", cwd: tmpRoot, workerName: "worker-1", knownWorkerPaneIds: [], env, tmuxExecutor: executor }),
+		spawnWorkerPane({ ctx, command: "worker-2", cwd: tmpRoot, workerName: "worker-2", knownWorkerPaneIds: [], env, tmuxExecutor: executor }),
+	]);
+	const splitRecords = records.filter((record) => record.command === "split-window");
+	const firstSplitIndex = records.findIndex((record) => record.command === "split-window");
+	const secondSplitIndex = records.findIndex((record, index) => index > firstSplitIndex && record.command === "split-window");
+	const updatedListBeforeSecondSplit = records.some(
+		(record, index) => record.command === "list-panes" && index > firstSplitIndex && index < secondSplitIndex && record.paneCount === 2,
+	);
+	assertEq([firstPaneId, secondPaneId], ["%1", "%2"], "concurrent tmux spawns return both pane ids");
+	assertEq(splitRecords.map((record) => record.target), ["%0", "%1"], "serialized tmux spawns target the newly visible worker pane");
+	assert(updatedListBeforeSecondSplit, "second tmux spawn lists panes after first split is visible");
 }
 
 // ── summary ──────────────────────────────────────────────────────────

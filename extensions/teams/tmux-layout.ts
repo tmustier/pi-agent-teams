@@ -15,14 +15,48 @@ interface TmuxPaneInfo {
 	height: number;
 }
 
-async function tmux(args: string[]): Promise<string> {
+export type TmuxExecutor = (args: readonly string[]) => Promise<string>;
+
+const spawnedWorkerPaneIdsByWindow = new Map<string, Set<string>>();
+let spawnWorkerPaneQueue: Promise<void> = Promise.resolve();
+
+async function defaultTmux(args: readonly string[]): Promise<string> {
 	try {
-		const { stdout } = await execFileAsync("tmux", args, { encoding: "utf8", maxBuffer: 1024 * 1024 });
+		const { stdout } = await execFileAsync("tmux", [...args], { encoding: "utf8", maxBuffer: 1024 * 1024 });
 		return stdout.trim();
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		throw new Error(`tmux ${args.join(" ")} failed: ${msg}`);
 	}
+}
+
+async function tmux(args: readonly string[], exec: TmuxExecutor = defaultTmux): Promise<string> {
+	return (await exec(args)).trim();
+}
+
+async function runSpawnWorkerPaneExclusive<T>(fn: () => Promise<T>): Promise<T> {
+	const previous = spawnWorkerPaneQueue;
+	let release: () => void = () => undefined;
+	spawnWorkerPaneQueue = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	await previous;
+	try {
+		return await fn();
+	} finally {
+		release();
+	}
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function envInt(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+	const raw = env[name];
+	const parsed = Number.parseInt(raw ?? "", 10);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.max(min, Math.min(max, parsed));
 }
 
 export function isTmuxSpawnMode(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -45,8 +79,8 @@ export async function getTmuxContext(env: NodeJS.ProcessEnv = process.env): Prom
 	return { sessionName, windowId, leaderPaneId: paneId };
 }
 
-async function listPanes(windowId: string): Promise<TmuxPaneInfo[]> {
-	const out = await tmux(["list-panes", "-t", windowId, "-F", "#{pane_id}\t#{pane_width}\t#{pane_height}"]);
+async function listPanes(windowId: string, exec?: TmuxExecutor): Promise<TmuxPaneInfo[]> {
+	const out = await tmux(["list-panes", "-t", windowId, "-F", "#{pane_id}\t#{pane_width}\t#{pane_height}"], exec);
 	if (!out.trim()) return [];
 	return out
 		.split(/\r?\n/)
@@ -80,17 +114,31 @@ function splitFlagForTarget(targetIsLeader: boolean): "-h" | "-v" {
 	return targetIsLeader ? "-h" : "-v";
 }
 
-async function resizeLeaderPane(ctx: TmuxContext, env: NodeJS.ProcessEnv): Promise<void> {
+async function resizeLeaderPane(ctx: TmuxContext, env: NodeJS.ProcessEnv, exec?: TmuxExecutor): Promise<void> {
 	const pctRaw = env.PI_TEAMS_TMUX_LEADER_WIDTH_PCT ?? "40";
 	const pct = Math.max(20, Math.min(80, Number.parseInt(pctRaw, 10) || 40));
 	try {
-		const widthRaw = await tmux(["display-message", "-p", "-t", ctx.windowId, "#{window_width}"]);
+		const widthRaw = await tmux(["display-message", "-p", "-t", ctx.windowId, "#{window_width}"], exec);
 		const width = Number.parseInt(widthRaw, 10);
 		if (!Number.isFinite(width) || width <= 0) return;
 		const leaderWidth = Math.max(30, Math.floor((width * pct) / 100));
-		await tmux(["resize-pane", "-t", ctx.leaderPaneId, "-x", String(leaderWidth)]);
+		await tmux(["resize-pane", "-t", ctx.leaderPaneId, "-x", String(leaderWidth)], exec);
 	} catch {
 		// Best-effort only: small terminal sizes can reject resize requests.
+	}
+}
+
+async function verifyPaneCreated(windowId: string, paneId: string, env: NodeJS.ProcessEnv, exec?: TmuxExecutor): Promise<void> {
+	const timeoutMs = envInt(env, "PI_TEAMS_TMUX_SPLIT_VERIFY_TIMEOUT_MS", 500, 0, 30_000);
+	const pollMs = envInt(env, "PI_TEAMS_TMUX_SPLIT_VERIFY_POLL_MS", 25, 1, 1_000);
+	const deadline = Date.now() + timeoutMs;
+	while (true) {
+		const panes = await listPanes(windowId, exec);
+		if (panes.some((pane) => pane.paneId === paneId)) return;
+		if (Date.now() >= deadline) {
+			throw new Error(`tmux split-window reported pane ${paneId}, but it was not visible in window ${windowId}`);
+		}
+		await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
 	}
 }
 
@@ -101,47 +149,64 @@ export async function spawnWorkerPane(opts: {
 	workerName: string;
 	knownWorkerPaneIds: readonly string[];
 	env?: NodeJS.ProcessEnv;
+	tmuxExecutor?: TmuxExecutor;
 }): Promise<string> {
-	const env = opts.env ?? process.env;
-	const panes = await listPanes(opts.ctx.windowId);
-	const paneById = new Map(panes.map((p) => [p.paneId, p]));
-	const liveWorkerPanes = opts.knownWorkerPaneIds
-		.map((id) => paneById.get(id))
-		.filter((p): p is TmuxPaneInfo => p !== undefined);
+	return runSpawnWorkerPaneExclusive(async () => {
+		const env = opts.env ?? process.env;
+		const exec = opts.tmuxExecutor;
+		const panes = await listPanes(opts.ctx.windowId, exec);
+		const paneById = new Map(panes.map((p) => [p.paneId, p]));
+		const spawnedWorkerPaneIds = spawnedWorkerPaneIdsByWindow.get(opts.ctx.windowId) ?? new Set<string>();
+		const candidateWorkerPaneIds = new Set([...opts.knownWorkerPaneIds, ...spawnedWorkerPaneIds]);
+		const liveWorkerPanes = [...candidateWorkerPaneIds]
+			.map((id) => paneById.get(id))
+			.filter((p): p is TmuxPaneInfo => p !== undefined);
 
-	const targetPane = liveWorkerPanes.length > 0 ? chooseLargestPane(liveWorkerPanes) : paneById.get(opts.ctx.leaderPaneId) ?? null;
-	const targetPaneId = targetPane?.paneId ?? opts.ctx.leaderPaneId;
-	const targetIsLeader = targetPaneId === opts.ctx.leaderPaneId;
-	const splitFlag = splitFlagForTarget(targetIsLeader);
+		const targetPane = liveWorkerPanes.length > 0 ? chooseLargestPane(liveWorkerPanes) : paneById.get(opts.ctx.leaderPaneId) ?? null;
+		const targetPaneId = targetPane?.paneId ?? opts.ctx.leaderPaneId;
+		const targetIsLeader = targetPaneId === opts.ctx.leaderPaneId;
+		const splitFlag = splitFlagForTarget(targetIsLeader);
 
-	const paneId = await tmux([
-		"split-window",
-		"-d",
-		splitFlag,
-		"-t",
-		targetPaneId,
-		"-P",
-		"-F",
-		"#{pane_id}",
-		"-c",
-		opts.cwd,
-		opts.command,
-	]);
+		const paneId = await tmux(
+			[
+				"split-window",
+				"-d",
+				splitFlag,
+				"-t",
+				targetPaneId,
+				"-P",
+				"-F",
+				"#{pane_id}",
+				"-c",
+				opts.cwd,
+				opts.command,
+			],
+			exec,
+		);
 
-	try {
-		await tmux(["select-pane", "-t", paneId, "-T", opts.workerName]);
-	} catch {
-		// Pane titles are cosmetic.
-	}
+		const verifyDelayMs = envInt(env, "PI_TEAMS_TMUX_SPLIT_VERIFY_DELAY_MS", 25, 0, 5_000);
+		if (verifyDelayMs > 0) await sleep(verifyDelayMs);
+		await verifyPaneCreated(opts.ctx.windowId, paneId, env, exec);
+		if (!spawnedWorkerPaneIdsByWindow.has(opts.ctx.windowId)) {
+			spawnedWorkerPaneIdsByWindow.set(opts.ctx.windowId, spawnedWorkerPaneIds);
+		}
+		spawnedWorkerPaneIds.add(paneId);
 
-	await resizeLeaderPane(opts.ctx, env);
-	try {
-		await tmux(["select-pane", "-t", opts.ctx.leaderPaneId]);
-	} catch {
-		// Best-effort focus restore.
-	}
+		try {
+			await tmux(["select-pane", "-t", paneId, "-T", opts.workerName], exec);
+		} catch {
+			// Pane titles are cosmetic.
+		}
 
-	return paneId;
+		await resizeLeaderPane(opts.ctx, env, exec);
+		try {
+			await tmux(["select-pane", "-t", opts.ctx.leaderPaneId], exec);
+		} catch {
+			// Best-effort focus restore.
+		}
+
+		return paneId;
+	});
 }
 
 export async function killPane(paneId: string): Promise<void> {
