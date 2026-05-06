@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
@@ -11,7 +11,7 @@ import { listTasks } from "./task-store.js";
 
 export async function handleTeamListCommand(opts: {
 	ctx: ExtensionCommandContext;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getTeamConfig: () => TeamConfig | null;
 	getTracker: () => ActivityTracker;
 	style: TeamsStyle;
@@ -152,7 +152,7 @@ export async function handleTeamEnvCommand(opts: {
 export async function handleTeamStatusCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getTeamConfig: () => TeamConfig | null;
 	getTracker: () => ActivityTracker;
 	teamId: string;

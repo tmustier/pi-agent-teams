@@ -7,7 +7,9 @@ import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
 import { createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
-import { TeammateRpc } from "./teammate-rpc.js";
+import { TeammateRpc, type TeammateHandle } from "./teammate-rpc.js";
+import { TeammateTmux } from "./teammate-tmux.js";
+import { getTmuxContext, isTmuxSpawnMode } from "./tmux-layout.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import { assessAttachClaimFreshness, heartbeatTeamAttachClaim, readTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
@@ -33,10 +35,12 @@ import {
 	type TeamsHookInvocation,
 } from "./hooks.js";
 import { handleTeamCommand } from "./leader-team-command.js";
+import { sendPromptOrFollowUp } from "./leader-messaging-commands.js";
 import { registerTeamsTool } from "./leader-teams-tool.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "./session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "./session-branching.js";
 import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode } from "./spawn-types.js";
+import { buildWorkerToolAllowlist } from "./worker-tools.js";
 
 function getTeamsExtensionEntryPath(): string | null {
 	// In dev, teammates won't automatically have this extension unless it is installed or discoverable.
@@ -140,7 +144,7 @@ async function teamDirHasAnyTasks(teamDir: string): Promise<boolean> {
 
 // Message parsers are shared with the worker implementation.
 export function runLeader(pi: ExtensionAPI): void {
-	const teammates = new Map<string, TeammateRpc>();
+	const teammates = new Map<string, TeammateHandle>();
 	const tracker = new ActivityTracker();
 	const transcriptTracker = new TranscriptTracker();
 	const teammateEventUnsubs = new Map<string, () => void>();
@@ -544,7 +548,36 @@ export function runLeader(pi: ExtensionAPI): void {
 		const { sessionFile, note } = session;
 		warnings.push(...session.warnings);
 
-		const t = new TeammateRpc(name, sessionFile);
+		const tmuxMode = isTmuxSpawnMode(process.env);
+		const tmuxContext = tmuxMode ? await getTmuxContext(process.env) : null;
+		if (tmuxMode && !tmuxContext) {
+			return { ok: false, error: "PI_TEAMS_SPAWN_MODE=tmux is set, but the leader is not running inside tmux (TMUX/TMUX_PANE missing or tmux unavailable)" };
+		}
+
+		const knownWorkerPaneIds = () => {
+			const ids = new Set<string>();
+			for (const member of teamConfig?.members ?? []) {
+				const paneId = member.meta?.["tmuxPaneId"];
+				if (typeof paneId === "string" && paneId) ids.add(paneId);
+			}
+			for (const teammate of teammates.values()) {
+				const paneId = "tmuxPaneId" in teammate ? teammate.tmuxPaneId : undefined;
+				if (typeof paneId === "string" && paneId) ids.add(paneId);
+			}
+			return Array.from(ids);
+		};
+
+		const t: TeammateHandle = tmuxContext
+			? new TeammateTmux({
+				name,
+				sessionFile,
+				teamDir,
+				taskListId: taskListId ?? teamId,
+				leadName: "team-lead",
+				tmuxContext,
+				knownWorkerPaneIds,
+			})
+			: new TeammateRpc(name, sessionFile);
 		teammates.set(name, t);
 		// Restore the widget if it was hidden by /team done — new work is starting.
 		restoreWidget();
@@ -590,8 +623,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			void setMemberStatus(teamDir, name, "offline", { meta: { exitCode: code ?? undefined } });
 		});
 
-		const builtInToolSet = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
-		const tools = (pi.getActiveTools() ?? []).filter((t) => builtInToolSet.has(t));
+		const tools = buildWorkerToolAllowlist(pi.getActiveTools?.());
 		const argsForChild: string[] = [];
 		if (sessionFile) argsForChild.push("--session", sessionFile);
 		argsForChild.push("--session-dir", teamSessionsDir);
@@ -610,7 +642,14 @@ export function runLeader(pi: ExtensionAPI): void {
 		}
 
 		const strings = getTeamsStrings(style);
-		const systemAppend = `You are ${strings.memberTitle.toLowerCase()} '${name}'. You collaborate with the ${strings.leaderTitle.toLowerCase()}. Prefer working from the shared task list.\n`;
+		const leaderTitle = strings.leaderTitle.toLowerCase();
+		const systemAppend = [
+			`You are ${strings.memberTitle.toLowerCase()} '${name}'. You collaborate with the ${leaderTitle}.`,
+			`To contact the ${leaderTitle}, use the message_lead tool. Do not edit team mailbox JSON or .lock files manually.`,
+			"Use team_message for teammate-to-teammate coordination.",
+			"Prefer working from the shared task list.",
+			"",
+		].join("\n");
 		argsForChild.push("--append-system-prompt", systemAppend);
 
 		const autoClaim = (process.env.PI_TEAMS_DEFAULT_AUTO_CLAIM ?? "1") === "1";
@@ -623,19 +662,22 @@ export function runLeader(pi: ExtensionAPI): void {
 			warnings.push(...res.warnings);
 		}
 
+		const childEnv: Record<string, string> = {
+			PI_TEAMS_WORKER: "1",
+			PI_TEAMS_TEAM_ID: teamId,
+			PI_TEAMS_TASK_LIST_ID: taskListId ?? teamId,
+			PI_TEAMS_AGENT_NAME: name,
+			PI_TEAMS_LEAD_NAME: "team-lead",
+			PI_TEAMS_STYLE: style,
+			PI_TEAMS_AUTO_CLAIM: autoClaim ? "1" : "0",
+		};
+		if (process.env.PI_TEAMS_ROOT_DIR) childEnv.PI_TEAMS_ROOT_DIR = process.env.PI_TEAMS_ROOT_DIR;
+		if (opts.planRequired) childEnv.PI_TEAMS_PLAN_REQUIRED = "1";
+
 		try {
 			await t.start({
 				cwd: childCwd,
-				env: {
-					PI_TEAMS_WORKER: "1",
-					PI_TEAMS_TEAM_ID: teamId,
-					PI_TEAMS_TASK_LIST_ID: taskListId ?? teamId,
-					PI_TEAMS_AGENT_NAME: name,
-					PI_TEAMS_LEAD_NAME: "team-lead",
-					PI_TEAMS_STYLE: style,
-					PI_TEAMS_AUTO_CLAIM: autoClaim ? "1" : "0",
-					...(opts.planRequired ? { PI_TEAMS_PLAN_REQUIRED: "1" } : {}),
-				},
+				env: childEnv,
 				args: argsForChild,
 			});
 		} catch (err) {
@@ -666,6 +708,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 		await ensureTeamConfig(teamDir, { teamId, taskListId: taskListId ?? teamId, leadName: "team-lead", style });
 		const childModel = formatProviderModel(childProvider, childModelId);
+		const tmuxPaneId = t instanceof TeammateTmux ? t.tmuxPaneId : null;
 		await upsertMember(teamDir, {
 			name,
 			role: "worker",
@@ -674,8 +717,17 @@ export function runLeader(pi: ExtensionAPI): void {
 			sessionFile,
 			meta: {
 				workspaceMode,
+				spawnBackend: tmuxContext ? "tmux" : "rpc",
 				sessionName,
 				thinkingLevel,
+				...(tmuxContext
+					? {
+						tmuxSession: tmuxContext.sessionName,
+						tmuxWindowId: tmuxContext.windowId,
+						tmuxLeaderPaneId: tmuxContext.leaderPaneId,
+						...(tmuxPaneId ? { tmuxPaneId } : {}),
+					}
+					: {}),
 				...(childModel ? { model: childModel } : {}),
 			},
 		});
@@ -941,8 +993,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			async sendMessage(name: string, message: string) {
 				const rpc = teammates.get(name);
 				if (rpc) {
-					if (rpc.status === "streaming") await rpc.followUp(message);
-					else await rpc.prompt(message);
+					await sendPromptOrFollowUp(rpc, message);
 					return;
 				}
 

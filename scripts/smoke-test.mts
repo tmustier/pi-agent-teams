@@ -70,9 +70,15 @@ import {
 	isPlanRejectedMessage,
 } from "../extensions/teams/protocol.js";
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
+import { planDelegateTeammateNames } from "../extensions/teams/leader-teams-tool.js";
+import { sendPromptOrFollowUp } from "../extensions/teams/leader-messaging-commands.js";
+import { runWorker } from "../extensions/teams/worker.js";
+import { buildWorkerToolAllowlist, WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "../extensions/teams/worker-tools.js";
+import type { TeammateHandle } from "../extensions/teams/teammate-rpc.js";
+import { TeammateTmux } from "../extensions/teams/teammate-tmux.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";
-import { SessionManager, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -224,6 +230,20 @@ console.log("\n2. fs-lock.withLock");
 }
 
 {
+	// Invalid/foreign lock recovery is opt-in and protects mailboxes from manual lock-file edits.
+	const lockFile = path.join(tmpRoot, "foreign.lock");
+	fs.writeFileSync(lockFile, "created by a foreign flock script");
+	const result = await withLock(lockFile, async () => "recovered", {
+		recoverAbandoned: true,
+		invalidLockGraceMs: 20,
+		timeoutMs: 1_000,
+		pollMs: 5,
+	});
+	assertEq(result, "recovered", "withLock recovers invalid foreign locks when enabled");
+	assert(!fs.existsSync(lockFile), "foreign lock cleaned up after recovery");
+}
+
+{
 	// Contention: many concurrent callers should serialize without throwing.
 	const lockFile = path.join(tmpRoot, "contended.lock");
 	const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -315,6 +335,20 @@ console.log("\n3. mailbox");
 	const msgs5 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
 	assertEq(msgs5.length, 1, "pop returns 1 normal message");
 	assertEq(msgs5.at(0)?.urgent, undefined, "non-urgent message has no urgent flag");
+
+	// Foreign/invalid mailbox lock files should recover quickly instead of poisoning writes for 60s.
+	const leadInboxPath = getInboxPath(teamDir, TEAM_MAILBOX_NS, "team-lead");
+	fs.mkdirSync(path.dirname(leadInboxPath), { recursive: true });
+	fs.writeFileSync(`${leadInboxPath}.lock`, "left by manual Python fcntl script");
+	const lockRecoveryStartedAt = Date.now();
+	await writeToMailbox(teamDir, TEAM_MAILBOX_NS, "team-lead", {
+		from: "agent1",
+		text: "recovered after foreign lock",
+		timestamp: "2025-01-01T00:05:00Z",
+	});
+	assert(Date.now() - lockRecoveryStartedAt < 5_000, "mailbox write recovers invalid foreign lock before writer timeout");
+	const recoveredMsgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "team-lead");
+	assertEq(recoveredMsgs.at(0)?.text, "recovered after foreign lock", "message delivered after foreign lock recovery");
 }
 
 // ── 4. task-store ────────────────────────────────────────────────────
@@ -1513,8 +1547,200 @@ console.log("\n14. leader-inbox LLM message injection");
 	}
 }
 
-// ── 15. docs/help drift guard ────────────────────────────────────────
-console.log("\n15. docs/help drift guard");
+// ── 15. worker/leader messaging hardening ───────────────────────────
+console.log("\n15. worker/leader messaging hardening");
+{
+	assertEq(
+		buildWorkerToolAllowlist(["read", "bash", "edit", "write", "grep", "find", "ls"]),
+		["read", "bash", "edit", "write", "grep", "find", "ls", "message_lead", "team_message"],
+		"worker spawn allowlist appends communication tools to normal built-ins",
+	);
+	assertEq(
+		buildWorkerToolAllowlist(["read", "grep", "find", "ls"]),
+		["read", "grep", "find", "ls", "message_lead", "team_message"],
+		"worker spawn allowlist keeps communication tools with read-only built-ins",
+	);
+	assertEq(
+		buildWorkerToolAllowlist(["read", "grep", "message_lead", "edit_file"]),
+		["read", "grep", "message_lead", "team_message"],
+		"worker spawn allowlist preserves built-in restrictions and avoids duplicate communication tools",
+	);
+	assertEq(
+		withWorkerCommunicationTools(["read", "message_lead"]),
+		["read", "message_lead", "team_message"],
+		"withWorkerCommunicationTools appends missing communication tools once",
+	);
+	assertEq(
+		[...WORKER_READ_ONLY_PLAN_TOOLS],
+		["read", "grep", "find", "ls", "message_lead", "team_message"],
+		"plan-required read-only tool set includes communication tools",
+	);
+
+	const planned = planDelegateTeammateNames({
+		inputTasks: [
+			{ text: "Investigate locks", assignee: "locksmith" },
+			{ text: "Trace messages", assignee: "messenger" },
+			{ text: "Audit UX", assignee: "ux-audit" },
+		],
+		style: "normal",
+		maxTeammates: 3,
+		existingTeammateNames: [],
+	});
+	assertEq(planned.join(","), "locksmith,messenger,ux-audit", "explicit task assignees plan exactly those teammates");
+	assert(!planned.some((name) => name.startsWith("agent")), "explicit task assignees do not spawn generic agent extras");
+
+	let promptCalls = 0;
+	let followUpCalls = 0;
+	const racingTeammate = {
+		name: "alice",
+		status: "idle",
+		async prompt(_message: string) {
+			promptCalls += 1;
+			throw new Error("Agent is already processing a prompt");
+		},
+		async followUp(_message: string) {
+			followUpCalls += 1;
+		},
+	} as unknown as TeammateHandle;
+	const delivery = await sendPromptOrFollowUp(racingTeammate, "status?");
+	assertEq(delivery, "followUpRetry", "prompt race falls back to followUp");
+	assertEq(promptCalls, 1, "prompt attempted once before fallback");
+	assertEq(followUpCalls, 1, "followUp used after prompt race");
+
+	type RegisteredTool = {
+		name: string;
+		description?: string;
+		promptGuidelines?: string[];
+		execute: (...args: unknown[]) => Promise<unknown>;
+	};
+	const registeredTools = new Map<string, RegisteredTool>();
+	const fakePi = {
+		registerTool(tool: RegisteredTool) {
+			registeredTools.set(tool.name, tool);
+		},
+		on() {
+			return undefined;
+		},
+	} as unknown as ExtensionAPI;
+
+	const envKeys = [
+		"PI_TEAMS_TEAM_ID",
+		"PI_TEAMS_TASK_LIST_ID",
+		"PI_TEAMS_AGENT_NAME",
+		"PI_TEAMS_LEAD_NAME",
+		"PI_TEAMS_ROOT_DIR",
+		"PI_TEAMS_AUTO_CLAIM",
+		"PI_TEAMS_PLAN_REQUIRED",
+	] as const;
+	const savedEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedEnv.set(key, process.env[key]);
+	const workerTeamId = "worker-tool-team";
+	const workerTeamDir = path.join(tmpRoot, workerTeamId);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = workerTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = workerTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "alice";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+
+		runWorker(fakePi);
+	} finally {
+		for (const key of envKeys) {
+			const value = savedEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+
+	const messageLead = registeredTools.get("message_lead");
+	assert(messageLead !== undefined, "worker registers message_lead tool");
+	if (messageLead) {
+		assert(messageLead.description?.includes("team lead") ?? false, "message_lead description mentions team lead");
+		await messageLead.execute("tc-lead", { message: "I am blocked", urgent: true }, undefined, undefined, undefined);
+	}
+
+	const workerLlmMessages: Array<{ content: string; options?: { deliverAs?: string } }> = [];
+	const workerStubCtx = {
+		cwd: workerTeamDir,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => workerTeamId },
+		isIdle: () => false,
+	} as unknown as ExtensionContext;
+	await pollLeaderInbox({
+		ctx: workerStubCtx,
+		teamId: workerTeamId,
+		teamDir: workerTeamDir,
+		taskListId: workerTeamId,
+		leadName: "team-lead",
+		style: "normal",
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			workerLlmMessages.push({ content, options });
+		},
+	});
+	assertEq(workerLlmMessages.length, 1, "message_lead routes one DM to leader LLM");
+	const leadMsg = workerLlmMessages[0];
+	if (leadMsg) {
+		assertEq(leadMsg.content, "[Team DM] alice: I am blocked", "leader receives worker DM content");
+		assertEq(leadMsg.options?.deliverAs, "steer", "urgent worker-to-lead DM uses steer delivery");
+	}
+
+	const teamMessage = registeredTools.get("team_message");
+	assert(teamMessage !== undefined, "worker registers team_message tool");
+	if (teamMessage) {
+		await teamMessage.execute("tc-team", { recipient: "team-lead", message: "generic path to lead", urgent: false }, undefined, undefined, undefined);
+	}
+	const leadInboxMsgs = await popUnreadMessages(workerTeamDir, TEAM_MAILBOX_NS, "team-lead");
+	assertEq(leadInboxMsgs.length, 1, "team_message to lead writes only the direct DM, no duplicate CC");
+	assertEq(leadInboxMsgs.at(0)?.text, "generic path to lead", "team_message to lead writes the direct message text");
+
+	const planSetActiveToolsCalls: string[][] = [];
+	const planHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	const planFakePi = {
+		registerTool() {
+			return undefined;
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			planHandlers.set(event, handler);
+			return undefined;
+		},
+		getActiveTools() {
+			return ["read", "grep", "message_lead"];
+		},
+		setActiveTools(tools: string[]) {
+			planSetActiveToolsCalls.push(tools);
+		},
+	} as unknown as ExtensionAPI;
+	const planWorkerTeamId = "worker-plan-tools-team";
+	const savedPlanEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedPlanEnv.set(key, process.env[key]);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = planWorkerTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = planWorkerTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "planner";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+		process.env.PI_TEAMS_PLAN_REQUIRED = "1";
+		runWorker(planFakePi);
+		await planHandlers.get("session_start")?.({ type: "session_start" }, {
+			cwd: path.join(tmpRoot, planWorkerTeamId),
+			sessionManager: { getSessionId: () => planWorkerTeamId, getSessionFile: () => undefined },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+	} finally {
+		for (const key of envKeys) {
+			const value = savedPlanEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+	assertEq(planSetActiveToolsCalls.at(0), [...WORKER_READ_ONLY_PLAN_TOOLS], "plan-required mode keeps communication tools active");
+}
+
+// ── 16. docs/help drift guard ────────────────────────────────────────
+console.log("\n16. docs/help drift guard");
 {
 	const help = getTeamHelpText();
 	assert(help.includes("/team done"), "help mentions /team done");
@@ -1557,6 +1783,7 @@ console.log("\n15. docs/help drift guard");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
 		assert(readme.includes("[--urgent]"), "README mentions --urgent flag");
 		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
+		assert(readme.includes("message_lead"), "README documents worker-to-lead message_lead tool");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
 		assert(readme.includes("docs/hook-contract.md"), "README references hook contract doc");
@@ -1575,6 +1802,7 @@ console.log("\n15. docs/help drift guard");
 		assert(skill.includes("team_done"), "SKILL.md mentions team_done action");
 		assert(skill.includes("/team done"), "SKILL.md mentions /team done command");
 		assert(skill.includes("urgent"), "SKILL.md mentions urgent flag");
+		assert(skill.includes("message_lead"), "SKILL.md mentions worker-to-lead message_lead tool");
 		assert(skill.includes("model_policy_get"), "SKILL.md mentions model_policy_get action");
 		assert(skill.includes("hooks_policy_get"), "SKILL.md mentions hooks_policy_get action");
 	}
@@ -1703,6 +1931,21 @@ console.log("\n15. docs/help drift guard");
 		}
 	}
 
+	// Simulate message_lead tool — should show lead + message.
+	tracker.handleEvent("alice", {
+		type: "tool_execution_start",
+		toolCallId: "tc4c",
+		toolName: "message_lead",
+		args: { message: "blocked on flaky test", urgent: true },
+	});
+	{
+		const e = lastEntry("alice");
+		assert(e.kind === "tool_start", "message_lead tool_start recorded");
+		if (e.kind === "tool_start") {
+			assert(e.summary === "→ lead: blocked on flaky test", "message_lead summary includes lead and message");
+		}
+	}
+
 	// Simulate unknown tool — fallback to first string arg
 	tracker.handleEvent("alice", {
 		type: "tool_execution_start",
@@ -1750,6 +1993,54 @@ console.log("\n15. docs/help drift guard");
 			assert(e.summary !== null && e.summary.endsWith("…"), "truncated summary ends with ellipsis");
 		}
 	}
+}
+
+// ── 13. tmux worker live session activity bridge ────────────────────
+{
+	console.log(`\n13. tmux worker live session activity bridge`);
+	const sessionFile = path.join(tmpRoot, "tmux-live-status.jsonl");
+	fs.writeFileSync(sessionFile, "", "utf8");
+	const teammate = new TeammateTmux({
+		name: "tmux-smoke",
+		sessionFile,
+		teamDir: tmpRoot,
+		taskListId: "smoke-tl",
+		leadName: "lead",
+		tmuxContext: { sessionName: "s", windowId: "w", leaderPaneId: "%0" },
+		knownWorkerPaneIds: () => [],
+	});
+	const events: string[] = [];
+	teammate.onEvent((ev) => events.push(ev.type));
+
+	fs.appendFileSync(sessionFile, `${JSON.stringify({ role: "user", content: [{ type: "text", text: "do work" }], timestamp: Date.now() })}\n`);
+	await teammate.refreshSessionActivity();
+	assertEq(teammate.status, "streaming", "tmux user prompt marks teammate streaming");
+	assert(events.includes("agent_start"), "tmux user prompt emits agent_start");
+
+	fs.appendFileSync(
+		sessionFile,
+		`${JSON.stringify({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }],
+			usage: { totalTokens: 7 },
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		})}\n`,
+	);
+	await teammate.refreshSessionActivity();
+	assert(events.includes("tool_execution_start"), "tmux assistant tool call emits tool start");
+	assert(events.includes("message_end"), "tmux assistant usage emits message_end");
+
+	fs.appendFileSync(
+		sessionFile,
+		`${JSON.stringify({ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false })}\n` +
+			`${JSON.stringify({ role: "assistant", content: [{ type: "text", text: "done" }], usage: { totalTokens: 11 }, stopReason: "stop" })}\n`,
+	);
+	await teammate.refreshSessionActivity();
+	assert(events.includes("tool_execution_end"), "tmux tool result emits tool end");
+	assertEq(teammate.status, "idle", "tmux final assistant text marks teammate idle");
+	assert(teammate.lastAssistantText.includes("done"), "tmux final assistant text updates lastAssistantText");
+	assert(teammate.lastEventAt > 0, "tmux live bridge updates lastEventAt");
 }
 
 // ── summary ──────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import {
 	updateTask,
 	type TeamTask,
 } from "./task-store.js";
+import { WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "./worker-tools.js";
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
@@ -127,25 +128,65 @@ export function runWorker(pi: ExtensionAPI): void {
 	// This keeps manual workers consistent with the current team terminology.
 	let style: TeamsStyle = styleId;
 
-	const TeamMessageToolParamsSchema = Type.Object({
-		recipient: Type.String({ description: "Name of the comrade to message" }),
+	const UrgentMessageParams = {
 		message: Type.String({ description: "The message to send" }),
 		urgent: Type.Optional(Type.Boolean({
 			description: "When true, the message interrupts the recipient's active turn via steering instead of waiting for idle. Use for time-sensitive coordination.",
 		})),
+	};
+
+	const TeamMessageToolParamsSchema = Type.Object({
+		recipient: Type.String({ description: "Name of the teammate to message. To contact the team lead, prefer the message_lead tool." }),
+		...UrgentMessageParams,
 	});
-	// Match the schema at compile-time.
+	const MessageLeadToolParamsSchema = Type.Object(UrgentMessageParams);
+	// Match the schemas at compile-time.
 	type TeamMessageToolParams = Static<typeof TeamMessageToolParamsSchema>;
+	type MessageLeadToolParams = Static<typeof MessageLeadToolParamsSchema>;
 	// Tool result details to match AgentToolResult<TDetails> contract.
 	type TeamMessageToolDetails = { recipient: string; timestamp: string; urgent: boolean };
 
 	pi.registerTool({
+		name: "message_lead",
+		label: "Message Lead",
+		description: "Send a question, status update, or blocker directly to the team lead. Use this instead of shell/Python scripts or manual mailbox edits.",
+		promptSnippet: "Message the team lead directly with a question, status update, or blocker.",
+		promptGuidelines: [
+			"Use this tool whenever you need to contact the team lead.",
+			"Do not edit team mailbox JSON or .lock files manually.",
+			"Set urgent=true only when the lead must be interrupted before finishing their current turn.",
+		],
+		parameters: MessageLeadToolParamsSchema,
+		async execute(
+			_toolCallId,
+			params: MessageLeadToolParams,
+			_signal,
+			_onUpdate,
+			_ctx,
+		): Promise<AgentToolResult<TeamMessageToolDetails>> {
+			const isUrgent = params.urgent === true;
+			const ts = new Date().toISOString();
+			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
+				from: agentName,
+				text: params.message,
+				timestamp: ts,
+				...(isUrgent ? { urgent: true } : {}),
+			});
+			return {
+				content: [{ type: "text", text: `${isUrgent ? "Urgent message" : "Message"} sent to team lead` }],
+				details: { recipient: leadName, timestamp: ts, urgent: isUrgent },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "team_message",
 		label: "Team Message",
-		description: "Send a message to a comrade. Use this to coordinate with peers on related tasks. Set urgent=true to interrupt their active turn (use sparingly — only for time-sensitive coordination).",
-		promptSnippet: "Send a coordination message to another teammate, optionally as an urgent interruption.",
+		description: "Send a message to another teammate. For the team lead, prefer message_lead. Set urgent=true to interrupt the recipient's active turn (use sparingly — only for time-sensitive coordination).",
+		promptSnippet: "Send a coordination message to another teammate, optionally as an urgent interruption. Use message_lead for the lead.",
 		promptGuidelines: [
 			"Use this tool for teammate-to-teammate coordination instead of overloading task status fields with freeform messages.",
+			"Use message_lead when you need to contact the team lead.",
 			"Set urgent=true only when the recipient must be interrupted before finishing their current turn.",
 		],
 		parameters: TeamMessageToolParamsSchema,
@@ -167,19 +208,22 @@ export function runWorker(pi: ExtensionAPI): void {
 				timestamp: ts,
 				...(isUrgent ? { urgent: true } : {}),
 			});
-			// CC leader with peer_dm_sent notification
-			await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
-				from: agentName,
-				text: JSON.stringify({
-					type: "peer_dm_sent",
+			// CC leader with peer_dm_sent notification for peer DMs only. If the recipient
+			// is the leader, the actual DM is already in the leader inbox.
+			if (recipient !== leadName) {
+				await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
 					from: agentName,
-					to: recipient,
-					summary: message.slice(0, 100),
-					urgent: isUrgent,
+					text: JSON.stringify({
+						type: "peer_dm_sent",
+						from: agentName,
+						to: recipient,
+						summary: message.slice(0, 100),
+						urgent: isUrgent,
+						timestamp: ts,
+					}),
 					timestamp: ts,
-				}),
-				timestamp: ts,
-			});
+				});
+			}
 			return {
 				content: [{ type: "text", text: `${isUrgent ? "Urgent message" : "Message"} sent to ${recipient}` }],
 				details: { recipient, timestamp: ts, urgent: isUrgent },
@@ -318,7 +362,7 @@ export function runWorker(pi: ExtensionAPI): void {
 					// Plan approval/rejection handling
 					const planApproval = isPlanApprovedMessage(m.text);
 					if (planApproval && planRequestId && planApproval.requestId === planRequestId) {
-						pi.setActiveTools(prePlanTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+						pi.setActiveTools(withWorkerCommunicationTools(prePlanTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]));
 						prePlanTools = null;
 						planApproved = true;
 						planMode = false;
@@ -451,11 +495,18 @@ export function runWorker(pi: ExtensionAPI): void {
 		if (completedStatus) payload.completedStatus = completedStatus;
 		if (failureReason) payload.failureReason = failureReason;
 
-		await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
-			from: agentName,
-			text: JSON.stringify(payload),
-			timestamp: new Date().toISOString(),
-		});
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			try {
+				await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
+					from: agentName,
+					text: JSON.stringify(payload),
+					timestamp: new Date().toISOString(),
+				});
+				return;
+			} catch {
+				if (attempt < 2) await sleep(250);
+			}
+		}
 	};
 
 	const cleanup = async (reason: string) => {
@@ -471,8 +522,8 @@ export function runWorker(pi: ExtensionAPI): void {
 
 		// Restrict tools in plan-required mode (read-only until plan is approved)
 		if (planMode) {
-			prePlanTools = pi.getActiveTools?.() ?? ["read", "bash", "edit", "write", "grep", "find", "ls"];
-			pi.setActiveTools(["read", "grep", "find", "ls"]);
+			prePlanTools = withWorkerCommunicationTools(pi.getActiveTools?.() ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+			pi.setActiveTools([...WORKER_READ_ONLY_PLAN_TOOLS]);
 		}
 
 		// Register ourselves in the shared team config so manual tmux workers are discoverable.

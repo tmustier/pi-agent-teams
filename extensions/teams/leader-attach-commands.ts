@@ -7,7 +7,7 @@ import {
 } from "./team-attach-claim.js";
 import { loadTeamConfig } from "./team-config.js";
 import { listDiscoveredTeams } from "./team-discovery.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { TeamsStyle } from "./teams-style.js";
 
 function formatClaimAge(heartbeatAt?: string): string {
@@ -23,7 +23,7 @@ export async function handleTeamAttachCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	defaultTeamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getActiveTeamId: () => string;
 	setActiveTeamId: (teamId: string) => void;
 	setStyle: (style: TeamsStyle) => void;
@@ -181,7 +181,7 @@ export async function handleTeamAttachCommand(opts: {
 export async function handleTeamDetachCommand(opts: {
 	ctx: ExtensionCommandContext;
 	defaultTeamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getActiveTeamId: () => string;
 	setActiveTeamId: (teamId: string) => void;
 	setTaskListId: (id: string) => void;

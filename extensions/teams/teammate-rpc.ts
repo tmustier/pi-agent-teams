@@ -3,6 +3,28 @@ import type { AgentEvent } from "@mariozechner/pi-agent-core";
 
 export type TeammateStatus = "starting" | "idle" | "streaming" | "stopped" | "error";
 
+export interface TeammateHandle {
+	readonly name: string;
+	readonly sessionFile?: string;
+	status: TeammateStatus;
+	lastAssistantText: string;
+	lastError: string | null;
+	currentTaskId: string | null;
+	lastStatusChangeAt: number;
+	lastEventAt: number;
+	onEvent(listener: (ev: AgentEvent) => void): () => void;
+	onClose(listener: (code: number | null) => void): () => void;
+	getStderr(): string;
+	start(opts: { cwd: string; env: Record<string, string>; args: string[] }): Promise<void>;
+	stop(): Promise<void>;
+	prompt(message: string): Promise<void>;
+	steer(message: string): Promise<void>;
+	followUp(message: string): Promise<void>;
+	abort(): Promise<void>;
+	getState(): Promise<unknown>;
+	setSessionName(name: string): Promise<void>;
+}
+
 type RpcCommand =
 	| { id: string; type: "prompt"; message: string }
 	| { id: string; type: "steer"; message: string }
@@ -75,7 +97,7 @@ function isAgentEvent(v: unknown): v is AgentEvent {
 	);
 }
 
-export class TeammateRpc {
+export class TeammateRpc implements TeammateHandle {
 	readonly name: string;
 	readonly sessionFile?: string;
 

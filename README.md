@@ -10,7 +10,7 @@ Core agent-teams primitives, matching Claude's design:
 
 - **Shared task list** — file-per-task on disk with three states (pending / in-progress / completed) and dependency tracking so blocked tasks stay blocked until their prerequisites finish.
 - **Auto-claim** — idle teammates automatically pick up the next unassigned, unblocked task. No manual dispatching required (disable with `PI_TEAMS_DEFAULT_AUTO_CLAIM=0`).
-- **Direct messages and broadcast** — send a message to one teammate or all of them at once, via file-based mailboxes. Urgent messages can interrupt active turns via steering.
+- **Direct messages and broadcast** — send a message to one teammate or all of them at once, via file-based mailboxes. Teammates can message the leader with `message_lead`. Urgent messages can interrupt active turns via steering.
 - **Graceful lifecycle** — spawn, stop, shutdown (with handshake), or kill teammates. The leader tracks who's online, idle, or streaming.
 - **LLM-callable teams tool** — the model can spawn teammates, delegate tasks, mutate task assignment/status/dependencies, message teammates, and run lifecycle actions in tool calls (no slash commands needed).
 - **Team done + cleanup** — `/team done` ends a run (stops teammates, hides the widget, notifies with a summary); the widget auto-detects when all tasks are complete and shows a hint. `/team cleanup` tears down artifacts afterward.
@@ -120,6 +120,14 @@ Or drive it manually:
 /team gc --dry-run                         # preview stale team dirs that would be removed
 ```
 
+For interactive tmux panes, start the leader inside tmux with tmux spawn mode enabled:
+
+```bash
+PI_TEAMS_SPAWN_MODE=tmux pi -e ./extensions/teams/index.ts
+```
+
+Then use `/team spawn`, `/swarm`, or the `teams` tool normally. Each dynamically spawned teammate opens as a full interactive Pi pane in the same tmux window (leader left, teammates tiled on the right).
+
 Or let the model drive it with the delegate tool:
 
 ```json
@@ -137,6 +145,16 @@ Or let the model drive it with the delegate tool:
 }
 ```
 
+### Worker-to-leader communication
+
+Teammates should contact the leader with their worker-side `message_lead` tool:
+
+```json
+{ "message": "I am blocked on the auth fixture", "urgent": false }
+```
+
+Set `urgent=true` only for time-sensitive interruptions. Teammates should not edit `mailboxes/**.json` or `.lock` files manually; the Teams extension owns mailbox locking and delivery.
+
 ### Teams tool action reference (agent-run)
 
 | Action | Required fields | Purpose |
@@ -150,11 +168,11 @@ Or let the model drive it with the delegate tool:
 | `task_dep_ls` | `taskId` | Inspect dependency/block graph for one task. |
 | `message_dm` | `name`, `message` | Send mailbox DM to one teammate. Set `urgent=true` to interrupt their active turn. |
 | `message_broadcast` | `message` | Send mailbox message to all discovered workers. Set `urgent=true` to interrupt active turns. |
-| `message_steer` | `name`, `message` | Send steer instruction to a running RPC teammate. |
-| `member_spawn` | `name` | Spawn one teammate (supports context/workspace/model/thinking/plan options). |
+| `message_steer` | `name`, `message` | Send steer instruction to a running teammate (RPC directly, tmux via urgent mailbox). |
+| `member_spawn` | `name` | Spawn one teammate (supports context/workspace/model/thinking/plan options; uses tmux panes when `PI_TEAMS_SPAWN_MODE=tmux`). |
 | `member_status` | optional `name` | Real-time worker status: activity, time in state, stall detection, tool use, tokens, last message. Omit name for all-worker summary. |
 | `member_shutdown` | `name` or `all=true` | Request graceful shutdown via mailbox handshake. |
-| `member_kill` | `name` | Force-stop one RPC teammate and unassign active tasks. |
+| `member_kill` | `name` | Force-stop one teammate and unassign active tasks (kills tmux pane in tmux mode). |
 | `member_prune` | _(none)_ | Mark stale non-RPC workers offline (`all=true` to force). |
 | `team_done` | _(none)_ | End team run: stop all teammates, mark workers offline, hide widget (`all=true` to force with in-progress tasks). |
 | `plan_approve` | `name` | Approve pending plan for a plan-required teammate. |
@@ -284,6 +302,8 @@ The `member_status` tool action provides the same information programmatically f
 | --- | --- | --- |
 | `PI_TEAMS_ROOT_DIR` | Storage root (absolute or relative to `~/.pi/agent`) | `~/.pi/agent/teams` |
 | `PI_TEAMS_DEFAULT_AUTO_CLAIM` | Whether spawned teammates auto-claim tasks | `1` (on) |
+| `PI_TEAMS_SPAWN_MODE` | Spawn backend: unset for managed RPC subprocesses, `tmux` for interactive tmux panes | unset |
+| `PI_TEAMS_TMUX_LEADER_WIDTH_PCT` | In tmux spawn mode, percentage of window width reserved for the leader pane | `40` |
 | `PI_TEAMS_STYLE` | UI style id (built-in: `normal`, `soviet`, `pirate`, or custom) | `normal` |
 | `PI_TEAMS_HOOKS_ENABLED` | Enable leader-side hooks/quality gates | `0` (off) |
 | `PI_TEAMS_HOOKS_DIR` | Hooks directory (absolute or relative to `PI_TEAMS_ROOT_DIR`) | `<teamsRoot>/_hooks` |
@@ -433,12 +453,23 @@ Tests worktree/branch cleanup lifecycle, full team directory removal, GC age/act
 
 ### tmux dogfooding
 
+Static/manual helper:
+
 ```bash
 ./scripts/start-tmux-team.sh pi-teams alice bob
 tmux attach -t pi-teams
 ```
 
-Starts a leader + one tmux window per teammate for interactive testing.
+Dynamic spawn mode:
+
+```bash
+PI_TEAMS_SPAWN_MODE=tmux pi -e ./extensions/teams/index.ts
+# inside Pi:
+/team spawn alice
+/team spawn bob
+```
+
+Dynamic spawn mode keeps the leader on the left and creates/tile teammates on the right as they are spawned. The static helper still starts a fixed leader + worker set up front for low-level testing.
 
 ## License
 

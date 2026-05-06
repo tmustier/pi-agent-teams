@@ -346,9 +346,10 @@ export async function pollLeaderInbox(opts: {
 			continue;
 		}
 
-		// Unrecognized message = teammate DM → route to leader LLM context
+		// Unrecognized message = teammate DM → route to leader LLM context.
+		// Urgent worker-to-lead DMs interrupt the current leader turn; normal DMs queue as follow-ups.
 		if (sendLeaderLlmMessage) {
-			sendLeaderLlmMessage(`[Team DM] ${m.from}: ${m.text}`, { deliverAs: "followUp" });
+			sendLeaderLlmMessage(`[Team DM] ${m.from}: ${m.text}`, { deliverAs: m.urgent ? "steer" : "followUp" });
 		} else {
 			ctx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
 		}

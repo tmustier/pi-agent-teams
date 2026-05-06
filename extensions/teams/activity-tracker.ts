@@ -102,6 +102,7 @@ function extractStartContent(toolName: string, args: unknown): string | null {
  *
  * grep: strips regex slashes → "TODO in /src" instead of "/TODO/ in /src"
  * team_message: "→ bob: please rebase onto main" instead of just "bob"
+ * message_lead: "→ lead: blocked on tests"
  * bash: normalizes whitespace
  * Others: same as extractStartContent
  */
@@ -115,6 +116,10 @@ function extractStartSummary(toolName: string, args: unknown): string | null {
 		if (typeof pattern !== "string") return null;
 		const suffix = typeof path === "string" ? ` in ${path}` : "";
 		return truncateContent(`${pattern}${suffix}`);
+	}
+	if (key === "message_lead") {
+		const message = args.message;
+		if (typeof message === "string") return truncateContent(`→ lead: ${message}`);
 	}
 	if (key === "team_message" || key === "message_dm" || key === "message_broadcast") {
 		const recipient = args.recipient ?? args.to ?? args.name;

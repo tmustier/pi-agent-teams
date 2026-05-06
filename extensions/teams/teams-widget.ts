@@ -1,7 +1,7 @@
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Component, TUI } from "@mariozechner/pi-tui";
 import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
@@ -25,7 +25,7 @@ import {
 import type { DisplayStatus, LeaderModelInfo } from "./teams-ui-shared.js";
 
 export interface WidgetDeps {
-	getTeammates(): Map<string, TeammateRpc>;
+	getTeammates(): Map<string, TeammateHandle>;
 	getTracker(): ActivityTracker;
 	getTasks(): TeamTask[];
 	getTeamConfig(): TeamConfig | null;

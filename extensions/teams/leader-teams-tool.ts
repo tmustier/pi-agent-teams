@@ -32,7 +32,7 @@ import {
 	unassignTasksForAgent,
 	updateTask,
 } from "./task-store.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import {
 	resolveDisplayStatus,
@@ -44,7 +44,66 @@ import {
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 import type { DelegationTracker } from "./leader-inbox.js";
 
-type TeamsToolDelegateTask = { text: string; assignee?: string };
+export type TeamsToolDelegateTask = { text: string; assignee?: string };
+
+function uniqueNames(names: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const name of names) {
+		const sanitized = sanitizeName(name);
+		if (!sanitized || seen.has(sanitized)) continue;
+		seen.add(sanitized);
+		out.push(sanitized);
+	}
+	return out;
+}
+
+function pickAutoNames(style: TeamsStyle, count: number, taken: Set<string>): string[] {
+	if (count <= 0) return [];
+	const naming = getTeamsNamingRules(style);
+	return naming.autoNameStrategy.kind === "agent"
+		? pickAgentNames(count, taken)
+		: pickNamesFromPool({
+			pool: naming.autoNameStrategy.pool,
+			count,
+			taken,
+			fallbackBase: naming.autoNameStrategy.fallbackBase,
+		});
+}
+
+export function planDelegateTeammateNames(opts: {
+	inputTasks: TeamsToolDelegateTask[];
+	explicitTeammates?: string[];
+	existingTeammateNames?: Iterable<string>;
+	style: TeamsStyle;
+	maxTeammates?: number;
+}): string[] {
+	const maxTeammates = Math.max(1, Math.min(16, opts.maxTeammates ?? 4));
+	const existing = uniqueNames(Array.from(opts.existingTeammateNames ?? []));
+	const explicit = uniqueNames(opts.explicitTeammates ?? []);
+	if (explicit.length) return explicit;
+
+	const taskAssignees = uniqueNames(opts.inputTasks.map((t) => t.assignee ?? ""));
+	const unassignedCount = opts.inputTasks.filter((t) => !sanitizeName(t.assignee ?? "")).length;
+
+	if (taskAssignees.length) {
+		const names = [...taskAssignees];
+		const existingForUnassigned = existing.filter((name) => !names.includes(name)).slice(0, unassignedCount);
+		names.push(...existingForUnassigned);
+
+		const remainingUnassigned = unassignedCount - existingForUnassigned.length;
+		if (remainingUnassigned > 0) {
+			const taken = new Set([...existing, ...names]);
+			names.push(...pickAutoNames(opts.style, Math.min(maxTeammates, remainingUnassigned), taken));
+		}
+
+		return names;
+	}
+
+	if (existing.length) return existing;
+
+	return pickAutoNames(opts.style, Math.min(maxTeammates, opts.inputTasks.length), new Set(existing));
+}
 
 function describeModelSource(source: TeammateModelSource): string {
 	if (source === "override") return "override";
@@ -163,7 +222,7 @@ type TeamsToolParamsType = Static<typeof TeamsToolParamsSchema>;
 
 export function registerTeamsTool(opts: {
 	pi: ExtensionAPI;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	spawnTeammate: SpawnTeammateFn;
 	getTeamId: (ctx: Parameters<SpawnTeammateFn>[0]) => string;
 	getTaskListId: () => string | null;
@@ -1188,31 +1247,13 @@ export function registerTeamsTool(opts: {
 			const spawnModel = modelOverride && modelOverride.length > 0 ? modelOverride : undefined;
 			const spawnThinking = params.thinking;
 
-			let teammateNames: string[] = [];
-			const explicit = params.teammates;
-			if (explicit && explicit.length) {
-				teammateNames = explicit.map((n) => sanitizeName(n)).filter((n) => n.length > 0);
-			}
-
-			if (teammateNames.length === 0 && teammates.size > 0) {
-				teammateNames = Array.from(teammates.keys());
-			}
-
-			if (teammateNames.length === 0) {
-				const maxTeammates = Math.max(1, Math.min(16, params.maxTeammates ?? 4));
-				const count = Math.min(maxTeammates, inputTasks.length);
-				const taken = new Set(teammates.keys());
-				const naming = getTeamsNamingRules(style);
-				teammateNames =
-					naming.autoNameStrategy.kind === "agent"
-						? pickAgentNames(count, taken)
-						: pickNamesFromPool({
-							pool: naming.autoNameStrategy.pool,
-							count,
-							taken,
-							fallbackBase: naming.autoNameStrategy.fallbackBase,
-						});
-			}
+			const teammateNames = planDelegateTeammateNames({
+				inputTasks,
+				explicitTeammates: params.teammates,
+				existingTeammateNames: teammates.keys(),
+				style,
+				maxTeammates: params.maxTeammates,
+			});
 
 			const spawned: string[] = [];
 			const warnings: string[] = [];
@@ -1249,7 +1290,7 @@ export function registerTeamsTool(opts: {
 					continue;
 				}
 
-				const explicitAssignee = t.assignee ? sanitizeName(t.assignee) : undefined;
+				const explicitAssignee = sanitizeName(t.assignee ?? "") || undefined;
 				const assignee = explicitAssignee ?? teammateNames[rr++ % teammateNames.length];
 				if (!assignee) {
 					warnings.push(`No assignee available for task: ${text.slice(0, 60)}`);

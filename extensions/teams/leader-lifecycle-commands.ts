@@ -18,7 +18,7 @@ import {
 	resolveTeamsStyleDefinition,
 	formatTeamsTemplate,
 } from "./teams-style.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 
 export async function handleTeamDelegateCommand(opts: {
 	ctx: ExtensionCommandContext;
@@ -153,7 +153,7 @@ export async function handleTeamCleanupCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	refreshTasks: () => Promise<void>;
 	getTasks: () => TeamTask[];
 	renderWidget: () => void;
@@ -245,7 +245,7 @@ export async function handleTeamShutdownCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getTeamConfig: () => TeamConfig | null;
 	leadName: string;
 	style: TeamsStyle;
@@ -406,7 +406,7 @@ export async function handleTeamPruneCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getTeamConfig: () => TeamConfig | null;
 	refreshTasks: () => Promise<void>;
 	getTasks: () => TeamTask[];
@@ -477,7 +477,7 @@ export async function handleTeamStopCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	leadName: string;
 	style: TeamsStyle;
 	refreshTasks: () => Promise<void>;
@@ -547,7 +547,7 @@ export async function handleTeamDoneCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getTeamConfig: () => TeamConfig | null;
 	leadName: string;
 	style: TeamsStyle;
@@ -643,7 +643,7 @@ export async function handleTeamKillCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	leadName: string;
 	style: TeamsStyle;
 	taskListId: string | null;

@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { pickAgentNames, pickNamesFromPool } from "./names.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsNamingRules, getTeamsStrings } from "./teams-style.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
@@ -23,7 +23,7 @@ function isThinkingLevel(v: string): v is ThinkingLevel {
 export async function handleTeamSpawnCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	style: TeamsStyle;
 	spawnTeammate: SpawnTeammateFn;
 }): Promise<void> {

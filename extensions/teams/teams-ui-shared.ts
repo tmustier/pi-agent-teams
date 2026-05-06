@@ -2,7 +2,7 @@ import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
-import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
+import type { TeammateHandle, TeammateStatus } from "./teammate-rpc.js";
 import {
 	areTeamsHooksEnabled,
 	getTeamsHookFailureAction,
@@ -93,7 +93,7 @@ function getStallThresholdMs(): number {
  * - Its transport status is "streaming" (i.e. not idle/stopped/error)
  * - No agent event has been received for > stallThresholdMs
  */
-export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): DisplayStatus {
+export function resolveDisplayStatus(rpc: TeammateHandle | undefined, cfg: TeamMember | undefined): DisplayStatus {
 	if (!rpc) return cfg?.status === "online" ? "idle" : "stopped";
 
 	if (rpc.status === "streaming") {
@@ -103,7 +103,7 @@ export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMemb
 	return rpc.status;
 }
 
-export function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
+export function resolveStatus(rpc: TeammateHandle | undefined, cfg: TeamMember | undefined): TeammateStatus {
 	if (rpc) return rpc.status;
 	return cfg?.status === "online" ? "idle" : "stopped";
 }
@@ -126,7 +126,7 @@ export function formatElapsed(ms: number): string {
 /**
  * Get a compact summary of the last assistant text (first 100 visible chars).
  */
-export function lastMessageSummary(rpc: TeammateRpc | undefined, maxLen: number = 100): string {
+export function lastMessageSummary(rpc: TeammateHandle | undefined, maxLen: number = 100): string {
 	if (!rpc) return "";
 	const raw = rpc.lastAssistantText;
 	if (!raw) return "";
@@ -147,7 +147,7 @@ export function formatTokens(n: number): string {
  */
 export function isTeamDone(
 	tasks: readonly TeamTask[],
-	teammates: ReadonlyMap<string, TeammateRpc>,
+	teammates: ReadonlyMap<string, TeammateHandle>,
 ): boolean {
 	if (tasks.length === 0) return false;
 	const pending = tasks.filter((t) => t.status === "pending").length;
@@ -208,7 +208,7 @@ export function getMemberThinking(member: TeamMember | undefined): string | null
  * - owning an in-progress task (even if RPC is disconnected)
  */
 export function getVisibleWorkerNames(opts: {
-	teammates: ReadonlyMap<string, TeammateRpc>;
+	teammates: ReadonlyMap<string, TeammateHandle>;
 	teamConfig: TeamConfig | null;
 	tasks: readonly TeamTask[];
 }): string[] {

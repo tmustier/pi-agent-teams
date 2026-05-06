@@ -81,6 +81,8 @@ For more control, use `/team spawn`:
 /team spawn dave plan          # plan-required mode (read-only until approved)
 ```
 
+Interactive tmux panes are opt-in. When the leader runs inside tmux with `PI_TEAMS_SPAWN_MODE=tmux`, all spawn paths (`/team spawn`, `member_spawn`, `delegate`, `/swarm`) create full interactive Pi panes dynamically. The leader stays on the left and teammate panes tile on the right.
+
 ## Task management
 
 ```
@@ -106,12 +108,12 @@ Teammates auto-claim unassigned, unblocked tasks by default.
 /team dm <name> --urgent <msg...>     # urgent DM — interrupts active turn via steering
 /team broadcast <msg...>              # message all teammates
 /team broadcast --urgent <msg...>     # urgent broadcast — interrupts all active turns
-/team send <name> <msg...>            # RPC-based (immediate, for spawned teammates)
+/team send <name> <msg...>            # immediate for RPC; mailbox-backed for tmux teammates
 ```
 
 Urgent messages (`--urgent` or `urgent=true` in tool calls) interrupt a teammate's active turn via steering instead of waiting for idle. Use sparingly — only for time-sensitive coordination like "stop using library X, it's broken".
 
-Teammates can also message each other directly via the `team_message` tool (with optional `urgent` flag), with the leader CC'd.
+Teammates can message each other directly via the `team_message` tool (with optional `urgent` flag), with the leader CC'd. Teammates should message the leader directly via the `message_lead` tool; they must not edit mailbox JSON or `.lock` files manually.
 
 ## Governance modes
 
@@ -195,3 +197,4 @@ Teammates and the leader communicate via JSON messages with a `type` field:
 | `plan_approved` | leader -> teammate | Proceed with implementation |
 | `plan_rejected` | leader -> teammate | Revise plan (includes feedback) |
 | `peer_dm_sent` | teammate -> leader | CC notification of peer message |
+| plain DM (`message_lead`) | teammate -> leader | Direct teammate question/status/blocker routed as `[Team DM]` |
