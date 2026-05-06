@@ -683,8 +683,9 @@ const DEFAULT_GC_MAX_AGE_HOURS = 24;
 export async function handleTeamGcCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
+	teamId?: string;
 }): Promise<void> {
-	const { ctx, rest } = opts;
+	const { ctx, rest, teamId } = opts;
 
 	const flags = rest.filter((a) => a.startsWith("--"));
 	const argsOnly = rest.filter((a) => !a.startsWith("--"));
@@ -729,11 +730,20 @@ export async function handleTeamGcCommand(opts: {
 		}
 	}
 
+	const excludeTeamIds = new Set<string>();
+	try {
+		excludeTeamIds.add(ctx.sessionManager.getSessionId());
+	} catch {
+		// ignore
+	}
+	if (teamId) excludeTeamIds.add(teamId);
+
 	const result = await gcStaleTeamDirs({
 		teamsRootDir: teamsRoot,
 		maxAgeMs,
 		repoCwd: ctx.cwd,
 		dryRun,
+		excludeTeamIds,
 	});
 
 	const lines: string[] = [];

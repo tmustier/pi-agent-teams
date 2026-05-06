@@ -10,6 +10,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 // We import from .ts source (tsx handles it)
 import { withLock } from "../extensions/teams/fs-lock.js";
@@ -32,7 +34,7 @@ import {
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus, updateTeamHooksPolicy } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
 import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelSelection } from "../extensions/teams/model-policy.js";
-import { formatUsageBreakdown, getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
+import { formatAggregatedUsageBreakdown, formatUsageBreakdown, getMemberModel, getMemberThinking, getTaskProgressSummary, getVisibleWorkerNames, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	HOOK_CONTRACT_VERSION,
@@ -75,7 +77,7 @@ import { planDelegateTeammateNames } from "../extensions/teams/leader-teams-tool
 import { sendPromptOrFollowUp } from "../extensions/teams/leader-messaging-commands.js";
 import { runWorker } from "../extensions/teams/worker.js";
 import { buildWorkerToolAllowlist, WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "../extensions/teams/worker-tools.js";
-import type { TeammateHandle } from "../extensions/teams/teammate-rpc.js";
+import { TeammateRpc, type TeammateHandle } from "../extensions/teams/teammate-rpc.js";
 import { TeammateTmux } from "../extensions/teams/teammate-tmux.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";
@@ -206,6 +208,30 @@ console.log("\n1c. teams-ui-shared helpers");
 		getMemberThinking({ name: "a", role: "worker", addedAt: "", status: "online", meta: { thinkingLevel: "high" } }),
 		"high",
 		"getMemberThinking extracts thinking from meta",
+	);
+
+	assertEq(
+		formatAggregatedUsageBreakdown({ input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, cost: 0 }, 250),
+		"↑1.0k ↓500 + 250 total",
+		"formatAggregatedUsageBreakdown preserves fallback-only totals with component totals",
+	);
+	assertEq(
+		getTaskProgressSummary([
+			{ id: "1", subject: "done", description: "", status: "completed", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" },
+			{ id: "2", subject: "active", description: "", status: "in_progress", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" },
+			{ id: "3", subject: "todo", description: "", status: "pending", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" },
+		]).percent,
+		33,
+		"getTaskProgressSummary percent includes in-progress tasks in denominator",
+	);
+	assertEq(
+		getVisibleWorkerNames({
+			teammates: new Map(),
+			teamConfig: { version: 1, teamId: "t", taskListId: "t", leadName: "lead", createdAt: "", updatedAt: "", members: [] },
+			tasks: [{ id: "4", subject: "owned", description: "", status: "in_progress", owner: "offline-worker", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" }],
+		}),
+		["offline-worker"],
+		"getVisibleWorkerNames includes in-progress owners that are not online/RPC",
 	);
 }
 
@@ -1305,6 +1331,43 @@ console.log("\n13. formatElapsed + lastMessageSummary");
 
 	const shortRpc = { lastAssistantText: "Short" } as unknown as import("../extensions/teams/teammate-rpc.js").TeammateRpc;
 	assert(lastMessageSummary(shortRpc, 20) === "Short", "lastMessageSummary keeps short text intact");
+}
+
+// ── 13b. TeammateRpc lifecycle ───────────────────────────────────────
+console.log("\n13b. TeammateRpc lifecycle");
+{
+	class FakeChildProcess extends EventEmitter {
+		stdin = new PassThrough();
+		stdout = new PassThrough();
+		stderr = new PassThrough();
+		exitCode: number | null = null;
+		signalCode: NodeJS.Signals | null = null;
+		killed = false;
+		signals: NodeJS.Signals[] = [];
+
+		kill(signal?: NodeJS.Signals | number): boolean {
+			const sig = typeof signal === "string" ? signal : "SIGTERM";
+			this.killed = true;
+			this.signals.push(sig);
+			return true;
+		}
+	}
+
+	const fakeProc = new FakeChildProcess();
+	const rpc = new TeammateRpc("lifecycle", undefined, (() => fakeProc) as never);
+	await rpc.start({ cwd: tmpRoot, env: {}, args: [] });
+	assertEq(rpc.status, "idle", "TeammateRpc test process starts idle");
+
+	await rpc.stop();
+	assertEq(rpc.status, "stopped", "TeammateRpc.stop immediately marks intentional stop");
+	assertEq(fakeProc.signals, ["SIGTERM"], "TeammateRpc.stop sends SIGTERM first");
+
+	await new Promise((resolve) => setTimeout(resolve, 1100));
+	assertEq(fakeProc.signals, ["SIGTERM", "SIGKILL"], "TeammateRpc.stop escalates stubborn child with retained proc ref");
+
+	fakeProc.emit("close", 143);
+	assertEq(rpc.status, "stopped", "TeammateRpc intentional SIGTERM close remains stopped");
+	assertEq(rpc.lastError, null, "TeammateRpc intentional stop does not surface false error");
 }
 
 // ── 14. leader-inbox LLM message injection ───────────────────────────

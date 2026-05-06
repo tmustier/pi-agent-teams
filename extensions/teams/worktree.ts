@@ -81,10 +81,27 @@ export async function ensureWorktreeCwd(opts: {
 	const worktreesDir = path.join(opts.teamDir, "worktrees");
 	const worktreePath = path.join(worktreesDir, safeAgent);
 	await fs.promises.mkdir(worktreesDir, { recursive: true });
+	const worktreesDirReal = await fs.promises.realpath(worktreesDir);
 
-	// Reuse if it already exists.
-	if (fs.existsSync(worktreePath)) {
-		return { cwd: worktreePath, warnings, mode: "worktree" };
+	// Reuse only a real directory under worktreesDir. Refuse symlinks/files to avoid path attacks.
+	try {
+		const st = await fs.promises.lstat(worktreePath);
+		if (st.isSymbolicLink() || !st.isDirectory()) {
+			warnings.push(`Refusing to reuse unsafe worktree path: ${worktreePath}. Using shared workspace instead.`);
+			return { cwd: opts.leaderCwd, warnings, mode: "shared" };
+		}
+		const real = await fs.promises.realpath(worktreePath);
+		const rel = path.relative(worktreesDirReal, real);
+		if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+			warnings.push(`Refusing to reuse worktree outside team worktrees dir: ${worktreePath}. Using shared workspace instead.`);
+			return { cwd: opts.leaderCwd, warnings, mode: "shared" };
+		}
+		return { cwd: real, warnings, mode: "worktree" };
+	} catch (err: unknown) {
+		if (!isErrnoException(err) || err.code !== "ENOENT") {
+			warnings.push(`Could not validate existing worktree path: ${worktreePath}. Using shared workspace instead.`);
+			return { cwd: opts.leaderCwd, warnings, mode: "shared" };
+		}
 	}
 
 	try {
@@ -112,6 +129,10 @@ export async function ensureWorktreeCwd(opts: {
  * Find the git repo root from a directory that may be inside a worktree.
  * Returns null if not a git repo.
  */
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+	return typeof err === "object" && err !== null && "code" in err;
+}
+
 async function findRepoRoot(cwd: string): Promise<string | null> {
 	try {
 		// --show-superproject-working-tree returns empty if not a worktree subproject.

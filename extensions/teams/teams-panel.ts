@@ -10,12 +10,15 @@ import {
 	DISPLAY_STATUS_COLOR,
 	DISPLAY_STATUS_ICON,
 	addUsageBreakdown,
+	formatAggregatedUsageBreakdown,
 	formatElapsed,
 	formatTokens,
 	formatUsageBreakdown,
 	getMemberModel,
 	getMemberThinking,
+	getTaskProgressSummary,
 	getVisibleWorkerNames,
+	isUsageBreakdownEmpty,
 	lastMessageSummary,
 	padRight,
 	renderPolicySummary,
@@ -141,7 +144,7 @@ function getQualityGateSummary(task: TeamTask): string | null {
 function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: number): string[] {
 	const ts = formatTimestamp(entry.timestamp);
 	const tsStr = theme.fg("dim", ts);
-	const maxTextWidth = width - 12; // " HH:MM:SS  " prefix
+	const maxTextWidth = Math.max(1, width - 12); // " HH:MM:SS  " prefix; always consume input when very narrow
 
 	if (entry.kind === "text") {
 		// Wrap long text lines
@@ -202,17 +205,8 @@ function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: numb
 export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: InteractiveWidgetDeps): Promise<void> {
 	const style = deps.getStyle();
 	const strings = getTeamsStrings(style);
-	const names = getVisibleWorkerNames({
-		teammates: deps.getTeammates(),
-		teamConfig: deps.getTeamConfig(),
-		tasks: deps.getTasks(),
-	});
-	if (names.length === 0) {
-		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to show`, "info");
-		return;
-	}
-
-	// Hide persistent widget while interactive one is open.
+	// Hide persistent widget while interactive one is open. Allow leader-only teams so
+	// the panel can still show leader tasks/policy and emergency controls.
 	deps.suppressWidget();
 
 	try {
@@ -416,16 +410,18 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						);
 					} else {
 						// Column widths
-						const totalPending = tasks.filter((t) => t.status === "pending").length;
-						const totalCompleted = tasks.filter((t) => t.status === "completed").length;
+						const progress = getTaskProgressSummary(tasks);
+						const totalPending = progress.pending;
+						const totalInProgress = progress.inProgress;
+						const totalCompleted = progress.completed;
 						let totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-						let totalTokensRaw = 0;
+						let fallbackOnlyTotal = 0;
 						for (const name of memberNames) {
 							const activity = tracker.get(name);
 							totalUsage = addUsageBreakdown(totalUsage, activity.usage);
-							totalTokensRaw += activity.totalTokens;
+							if (activity.totalTokens > 0 && isUsageBreakdownEmpty(activity.usage)) fallbackOnlyTotal += activity.totalTokens;
 						}
-						const totalUsageStr = formatUsageBreakdown(totalUsage, { fallbackTotal: totalTokensRaw });
+						const totalUsageStr = formatAggregatedUsageBreakdown(totalUsage, fallbackOnlyTotal);
 
 						const nameColWidth = Math.max(...rows.map((r) => visibleWidth(r.displayName)));
 						const pW = Math.max(
@@ -481,16 +477,13 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						lines.push(truncateToWidth(sepLine, width));
 
 						const totalLabel = theme.bold("Total");
-						const totalTaskCount = totalPending + totalCompleted;
-						const pct =
-							totalTaskCount > 0 ? Math.round((totalCompleted / totalTaskCount) * 100) : 0;
-						const pctLabel = theme.fg("success", padRight(`${pct}%`, 9));
+						const pctLabel = theme.fg("success", padRight(`${progress.percent}%`, 9));
 						const tpNum = String(totalPending).padStart(pW);
 						const tcNum = String(totalCompleted).padStart(cW);
 						const totalUsagePadded = totalUsageStr.padStart(usageW);
 						const totalSuffix = theme.fg(
 							"muted",
-							` \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${totalUsagePadded}`,
+							` \u00b7 ${totalInProgress} in progress \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${totalUsagePadded}`,
 						);
 						const totalRow = ` ${padRight(totalLabel, nameColWidth + 3)} ${pctLabel}${totalSuffix}`;
 						lines.push(truncateToWidth(totalRow, width));
@@ -1217,7 +1210,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							return;
 						}
 						if (matchesKey(data, "down") || data === "s") {
-							cursorIndex = Math.min(memberNames.length - 1, cursorIndex + 1);
+							cursorIndex = Math.max(0, Math.min(memberNames.length - 1, cursorIndex + 1));
 							tui.requestRender();
 							return;
 						}

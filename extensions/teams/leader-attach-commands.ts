@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { getTeamDir } from "./paths.js";
+import { getTeamDir, validateTeamId } from "./paths.js";
 import {
 	acquireTeamAttachClaim,
 	releaseTeamAttachClaim,
@@ -100,6 +100,11 @@ export async function handleTeamAttachCommand(opts: {
 	const targetTeamId = positional[0]?.trim() ?? "";
 	if (!targetTeamId || positional.length !== 1) {
 		ctx.ui.notify("Usage: /team attach <teamId> [--claim]", "error");
+		return;
+	}
+	const teamIdError = validateTeamId(targetTeamId);
+	if (teamIdError) {
+		ctx.ui.notify(`Invalid teamId: ${teamIdError}`, "error");
 		return;
 	}
 	if (targetTeamId === activeTeamId) {

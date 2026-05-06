@@ -39,6 +39,7 @@ import {
 	formatElapsed,
 	lastMessageSummary,
 	formatUsageBreakdown,
+	getVisibleWorkerNames,
 	toolActivity,
 } from "./teams-ui-shared.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
@@ -620,16 +621,9 @@ export function registerTeamsTool(opts: {
 					const cfgByName = new Map<string, (typeof cfgMembers)[number]>();
 					for (const m of cfgMembers) cfgByName.set(m.name, m);
 
-					const workerNames = new Set<string>();
-					for (const n of teammates.keys()) workerNames.add(n);
-					for (const m of cfgMembers) {
-						if (m.role === "worker" && m.status === "online") workerNames.add(m.name);
-					}
-					for (const t of allTasks) {
-						if (t.owner && t.owner !== (teamCfg?.leadName ?? "") && t.status === "in_progress") workerNames.add(t.owner);
-					}
+					const workerNames = getVisibleWorkerNames({ teammates, teamConfig: teamCfg, tasks: allTasks });
 
-					if (workerNames.size === 0) {
+					if (workerNames.length === 0) {
 						return {
 							content: [{ type: "text", text: `No ${strings.memberTitle.toLowerCase()}s to report on` }],
 							details: { action, teamId, workers: [] },
@@ -638,7 +632,7 @@ export function registerTeamsTool(opts: {
 
 					const workers: Array<Record<string, unknown>> = [];
 					const lines: string[] = [];
-					for (const n of Array.from(workerNames).sort()) {
+					for (const n of workerNames) {
 						const rpc = teammates.get(n);
 						const memberCfg = cfgByName.get(n);
 						const displayStatus = resolveDisplayStatus(rpc, memberCfg);
@@ -678,7 +672,9 @@ export function registerTeamsTool(opts: {
 				// Single worker status
 				const rpc = teammates.get(name);
 				const memberCfg = (teamCfg?.members ?? []).find((m) => m.name === name);
-				if (!rpc && !memberCfg) {
+				const allTasks = await listTasks(teamDir, effectiveTlId);
+				const owned = allTasks.filter((t) => t.owner === name);
+				if (!rpc && !memberCfg && !owned.some((t) => t.status === "in_progress")) {
 					return {
 						content: [{ type: "text", text: `Unknown ${strings.memberTitle.toLowerCase()}: ${name}` }],
 						details: { action, name },
@@ -692,8 +688,6 @@ export function registerTeamsTool(opts: {
 				const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
 				const currentTool = toolActivity(activity.currentToolName);
 				const msgPreview = lastMessageSummary(rpc, 120);
-				const allTasks = await listTasks(teamDir, effectiveTlId);
-				const owned = allTasks.filter((t) => t.owner === name);
 				const activeTask = owned.find((t) => t.status === "in_progress");
 				const model = memberCfg?.meta?.["model"];
 				const cwd = memberCfg?.cwd;

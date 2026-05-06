@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn as nodeSpawn } from "node:child_process";
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 
 export type TeammateStatus = "starting" | "idle" | "streaming" | "stopped" | "error";
@@ -114,7 +114,9 @@ export class TeammateRpc implements TeammateHandle {
 	/** Epoch ms of the most recent agent event received from the child process. */
 	lastEventAt: number = Date.now();
 
-	private proc: ReturnType<typeof spawn> | null = null;
+	private proc: ReturnType<typeof nodeSpawn> | null = null;
+	private stopping = false;
+	private readonly spawnFn: typeof nodeSpawn;
 	private pending = new Map<string, { resolve: (v: RpcResponse) => void; reject: (e: Error) => void }>();
 	private nextId = 0;
 	private buffer = "";
@@ -122,9 +124,10 @@ export class TeammateRpc implements TeammateHandle {
 	private eventListeners: Array<(ev: AgentEvent) => void> = [];
 	private closeListeners: Array<(code: number | null) => void> = [];
 
-	constructor(name: string, sessionFile?: string) {
+	constructor(name: string, sessionFile?: string, spawnFn: typeof nodeSpawn = nodeSpawn) {
 		this.name = name;
 		this.sessionFile = sessionFile;
+		this.spawnFn = spawnFn;
 	}
 
 	onEvent(listener: (ev: AgentEvent) => void): () => void {
@@ -150,26 +153,30 @@ export class TeammateRpc implements TeammateHandle {
 	async start(opts: { cwd: string; env: Record<string, string>; args: string[] }): Promise<void> {
 		if (this.proc) throw new Error("Teammate already started");
 
-		this.proc = spawn("pi", ["--mode", "rpc", ...opts.args], {
+		const proc = this.spawnFn("pi", ["--mode", "rpc", ...opts.args], {
 			cwd: opts.cwd,
 			env: { ...process.env, ...opts.env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
+		this.proc = proc;
+		this.stopping = false;
 
-		this.proc.on("error", (err) => {
-			this.status = "error";
-			this.lastError = String(err);
+		proc.on("error", (err) => {
+			if (this.proc === proc) this.proc = null;
+			this.status = this.stopping ? "stopped" : "error";
+			this.lastStatusChangeAt = Date.now();
+			if (!this.stopping) this.lastError = String(err);
 			for (const [id, p] of this.pending.entries()) {
 				p.reject(new Error(`Process error before response (id=${id}): ${String(err)}`));
 			}
 			this.pending.clear();
 		});
 
-		this.proc.stderr?.on("data", (d) => {
+		proc.stderr?.on("data", (d) => {
 			this.stderr += d.toString();
 		});
 
-		this.proc.stdout?.on("data", (d) => {
+		proc.stdout?.on("data", (d) => {
 			this.buffer += d.toString();
 			let idx: number;
 			while ((idx = this.buffer.indexOf("\n")) >= 0) {
@@ -179,9 +186,13 @@ export class TeammateRpc implements TeammateHandle {
 			}
 		});
 
-		this.proc.on("close", (code) => {
-			this.status = code === 0 ? "stopped" : "error";
-			if (code !== 0) this.lastError = `Teammate process exited with code ${code}`;
+		proc.on("close", (code) => {
+			if (this.proc === proc) this.proc = null;
+			const intentionalStop = this.stopping || this.status === "stopped";
+			this.status = intentionalStop || code === 0 ? "stopped" : "error";
+			this.lastStatusChangeAt = Date.now();
+			if (!intentionalStop && code !== 0) this.lastError = `Teammate process exited with code ${code}`;
+			this.stopping = false;
 			for (const [id, p] of this.pending.entries()) {
 				p.reject(new Error(`Process exited before response (id=${id})`));
 			}
@@ -198,18 +209,18 @@ export class TeammateRpc implements TeammateHandle {
 	}
 
 	async stop(): Promise<void> {
-		if (!this.proc) return;
-		try {
-			await this.abort();
-		} catch {
+		const proc = this.proc;
+		if (!proc) return;
+		this.stopping = true;
+		void this.abort().catch(() => {
 			// ignore
-		}
-		this.proc.kill("SIGTERM");
+		});
+		proc.kill("SIGTERM");
 		setTimeout(() => {
-			if (this.proc && !this.proc.killed) this.proc.kill("SIGKILL");
+			if (this.proc === proc && proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
 		}, 1000);
-		this.proc = null;
 		this.status = "stopped";
+		this.lastStatusChangeAt = Date.now();
 	}
 
 	async prompt(message: string): Promise<void> {
@@ -278,7 +289,7 @@ export class TeammateRpc implements TeammateHandle {
 	}
 
 	private async send(cmd: RpcCommandWithoutId): Promise<RpcResponse> {
-		if (!this.proc || !this.proc.stdin) throw new Error("Teammate is not running");
+		if ((this.stopping && cmd.type !== "abort") || !this.proc || !this.proc.stdin) throw new Error("Teammate is not running");
 		const id = `req-${this.name}-${this.nextId++}`;
 		const full = { id, ...cmd } satisfies RpcCommand;
 

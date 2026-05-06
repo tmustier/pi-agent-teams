@@ -17,8 +17,25 @@ export function getTeamsRootDir(): string {
 	return path.join(getAgentDir(), "teams");
 }
 
+export function validateTeamId(teamId: string): string | null {
+	if (!teamId || teamId.trim() !== teamId) return "teamId must be non-empty and have no leading/trailing whitespace";
+	if (teamId === "." || teamId === ".." || teamId.includes("..")) return "teamId must not contain traversal segments";
+	if (path.isAbsolute(teamId) || teamId.includes("/") || teamId.includes("\\")) return "teamId must not contain path separators";
+	return null;
+}
+
+export function assertValidTeamId(teamId: string): void {
+	const err = validateTeamId(teamId);
+	if (err) throw new Error(`Invalid teamId ${JSON.stringify(teamId)}: ${err}`);
+}
+
 export function getTeamDir(teamId: string): string {
-	return path.join(getTeamsRootDir(), teamId);
+	assertValidTeamId(teamId);
+	const root = path.resolve(getTeamsRootDir());
+	const dir = path.resolve(root, teamId);
+	const rel = path.relative(root, dir);
+	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`Invalid teamId ${JSON.stringify(teamId)}: outside teams root`);
+	return dir;
 }
 
 /** Directory for custom team UI styles (terminology + name rules). */

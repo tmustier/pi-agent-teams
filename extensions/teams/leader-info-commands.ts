@@ -5,7 +5,7 @@ import type { TeammateHandle } from "./teammate-rpc.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
-import { resolveDisplayStatus, formatElapsed, formatUsageBreakdown, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
+import { resolveDisplayStatus, formatElapsed, formatUsageBreakdown, getVisibleWorkerNames, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import { listTasks } from "./task-store.js";
 
@@ -167,6 +167,7 @@ export async function handleTeamStatusCommand(opts: {
 	const effectiveTlId = taskListId ?? teamId;
 
 	const nameRaw = rest[0];
+	const allTasks = await listTasks(teamDir, effectiveTlId);
 
 	// If no name, show summary of all workers (same as member_status with no name).
 	if (!nameRaw) {
@@ -174,19 +175,15 @@ export async function handleTeamStatusCommand(opts: {
 		const cfgByName = new Map<string, TeamMember>();
 		for (const m of cfgMembers) cfgByName.set(m.name, m);
 
-		const workerNames = new Set<string>();
-		for (const n of teammates.keys()) workerNames.add(n);
-		for (const m of cfgMembers) {
-			if (m.role === "worker" && m.status === "online") workerNames.add(m.name);
-		}
+		const workerNames = getVisibleWorkerNames({ teammates, teamConfig, tasks: allTasks });
 
-		if (workerNames.size === 0) {
+		if (workerNames.length === 0) {
 			ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s`, "info");
 			return;
 		}
 
 		const lines: string[] = [];
-		for (const n of Array.from(workerNames).sort()) {
+		for (const n of workerNames) {
 			const rpc = teammates.get(n);
 			const cfg = cfgByName.get(n);
 			const displayStatus = resolveDisplayStatus(rpc, cfg);
@@ -206,7 +203,8 @@ export async function handleTeamStatusCommand(opts: {
 	const name = sanitizeName(nameRaw);
 	const rpc = teammates.get(name);
 	const memberCfg = (teamConfig?.members ?? []).find((m) => m.name === name);
-	if (!rpc && !memberCfg) {
+	const owned = allTasks.filter((t) => t.owner === name);
+	if (!rpc && !memberCfg && !owned.some((t) => t.status === "in_progress")) {
 		ctx.ui.notify(`Unknown ${strings.memberTitle.toLowerCase()}: ${name}`, "error");
 		return;
 	}
@@ -217,8 +215,6 @@ export async function handleTeamStatusCommand(opts: {
 	const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
 	const currentTool = toolActivity(activity.currentToolName);
 	const msgPreview = lastMessageSummary(rpc, 120);
-	const allTasks = await listTasks(teamDir, effectiveTlId);
-	const owned = allTasks.filter((t) => t.owner === name);
 	const activeTask = owned.find((t) => t.status === "in_progress");
 	const model = memberCfg?.meta?.["model"];
 	const cwd = memberCfg?.cwd;

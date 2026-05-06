@@ -159,6 +159,10 @@ export function addUsageBreakdown(a: UsageBreakdownLike, b: UsageBreakdownLike):
 	};
 }
 
+export function isUsageBreakdownEmpty(usage: UsageBreakdownLike): boolean {
+	return usage.input === 0 && usage.output === 0 && usage.cacheRead === 0 && usage.cacheWrite === 0 && usage.cost === 0;
+}
+
 export function formatUsageBreakdown(usage: UsageBreakdownLike, opts: { includeCost?: boolean; fallbackTotal?: number } = {}): string {
 	const parts: string[] = [];
 	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
@@ -169,6 +173,31 @@ export function formatUsageBreakdown(usage: UsageBreakdownLike, opts: { includeC
 	if (parts.length > 0) return parts.join(" ");
 	if (opts.fallbackTotal && opts.fallbackTotal > 0) return `${formatTokens(opts.fallbackTotal)} total`;
 	return "0";
+}
+
+export function formatAggregatedUsageBreakdown(
+	usage: UsageBreakdownLike,
+	fallbackOnlyTotal: number,
+	opts: { includeCost?: boolean } = {},
+): string {
+	const base = formatUsageBreakdown(usage, { ...opts, fallbackTotal: fallbackOnlyTotal });
+	if (fallbackOnlyTotal > 0 && !isUsageBreakdownEmpty(usage)) return `${base} + ${formatTokens(fallbackOnlyTotal)} total`;
+	return base;
+}
+
+export function getTaskProgressSummary(tasks: readonly TeamTask[]): {
+	pending: number;
+	inProgress: number;
+	completed: number;
+	total: number;
+	percent: number;
+} {
+	const pending = tasks.filter((t) => t.status === "pending").length;
+	const inProgress = tasks.filter((t) => t.status === "in_progress").length;
+	const completed = tasks.filter((t) => t.status === "completed").length;
+	const total = pending + inProgress + completed;
+	const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+	return { pending, inProgress, completed, total, percent };
 }
 
 /**

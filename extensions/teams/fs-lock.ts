@@ -24,7 +24,12 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
-function readLockPid(lockFilePath: string): { kind: "valid"; pid: number } | { kind: "invalid" } | { kind: "missing" } {
+type LockReadResult =
+	| { kind: "valid"; pid: number; token?: string }
+	| { kind: "invalid" }
+	| { kind: "missing" };
+
+function readLock(lockFilePath: string): LockReadResult {
 	let raw: string;
 	try {
 		raw = fs.readFileSync(lockFilePath, "utf8");
@@ -36,7 +41,7 @@ function readLockPid(lockFilePath: string): { kind: "valid"; pid: number } | { k
 	try {
 		const parsed: unknown = JSON.parse(raw);
 		if (!isRecord(parsed) || typeof parsed.pid !== "number") return { kind: "invalid" };
-		return { kind: "valid", pid: parsed.pid };
+		return { kind: "valid", pid: parsed.pid, token: typeof parsed.token === "string" ? parsed.token : undefined };
 	} catch {
 		return { kind: "invalid" };
 	}
@@ -67,13 +72,16 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 
 	let fd: number | null = null;
 	let attempt = 0;
+	const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 
 	while (fd === null) {
 		try {
 			fd = fs.openSync(lockFilePath, "wx");
 			const payload = {
 				pid: process.pid,
+				token,
 				createdAt: new Date().toISOString(),
+				heartbeatAt: new Date().toISOString(),
 				label: opts.label,
 			};
 			fs.writeFileSync(fd, JSON.stringify(payload));
@@ -85,13 +93,22 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 				const st = fs.statSync(lockFilePath);
 				const age = Date.now() - st.mtimeMs;
 				if (age > staleMs) {
-					fs.unlinkSync(lockFilePath);
-					attempt = 0;
-					continue;
+					const lock = readLock(lockFilePath);
+					if (lock.kind === "missing") {
+						attempt = 0;
+						continue;
+					}
+					// Do not steal from a live process just because it exceeded staleMs;
+					// holders heartbeat the lock mtime while running. Only recover dead/invalid locks.
+					if (lock.kind === "invalid" || (lock.kind === "valid" && !isProcessAlive(lock.pid))) {
+						fs.unlinkSync(lockFilePath);
+						attempt = 0;
+						continue;
+					}
 				}
 
 				if (opts.recoverAbandoned && age > invalidLockGraceMs) {
-					const lock = readLockPid(lockFilePath);
+					const lock = readLock(lockFilePath);
 					if (lock.kind === "missing") {
 						attempt = 0;
 						continue;
@@ -122,16 +139,29 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 		}
 	}
 
+	const heartbeatMs = Math.max(100, Math.min(Math.floor(staleMs / 3), 5_000));
+	const heartbeat = setInterval(() => {
+		if (fd === null) return;
+		try {
+			const now = new Date();
+			fs.futimesSync(fd, now, now);
+		} catch {
+			// ignore heartbeat failures; stale recovery still checks process liveness.
+		}
+	}, heartbeatMs);
+
 	try {
 		return await fn();
 	} finally {
+		clearInterval(heartbeat);
 		try {
 			if (fd !== null) fs.closeSync(fd);
 		} catch {
 			// ignore
 		}
 		try {
-			fs.unlinkSync(lockFilePath);
+			const lock = readLock(lockFilePath);
+			if (lock.kind === "valid" && lock.token === token) fs.unlinkSync(lockFilePath);
 		} catch {
 			// ignore
 		}

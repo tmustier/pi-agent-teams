@@ -11,11 +11,14 @@ import {
 	DISPLAY_STATUS_COLOR,
 	DISPLAY_STATUS_ICON,
 	addUsageBreakdown,
+	formatAggregatedUsageBreakdown,
 	formatElapsed,
 	formatUsageBreakdown,
 	getMemberModel,
 	getMemberThinking,
+	getTaskProgressSummary,
 	getVisibleWorkerNames,
+	isUsageBreakdownEmpty,
 	isTeamDone,
 	padRight,
 	renderPolicySummary,
@@ -186,16 +189,18 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					}
 
 					// ── Compute column widths ──
-					const totalPending = tasks.filter((t) => t.status === "pending").length;
-					const totalCompleted = tasks.filter((t) => t.status === "completed").length;
+					const progress = getTaskProgressSummary(tasks);
+					const totalPending = progress.pending;
+					const totalInProgress = progress.inProgress;
+					const totalCompleted = progress.completed;
 					let totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-					let totalTokensRaw = 0;
+					let fallbackOnlyTotal = 0;
 					for (const name of workerNames) {
 						const activity = tracker.get(name);
 						totalUsage = addUsageBreakdown(totalUsage, activity.usage);
-						totalTokensRaw += activity.totalTokens;
+						if (activity.totalTokens > 0 && isUsageBreakdownEmpty(activity.usage)) fallbackOnlyTotal += activity.totalTokens;
 					}
-					const totalUsageStr = formatUsageBreakdown(totalUsage, { fallbackTotal: totalTokensRaw });
+					const totalUsageStr = formatAggregatedUsageBreakdown(totalUsage, fallbackOnlyTotal);
 
 					const nameColWidth = Math.max(...rows.map((r) => visibleWidth(r.displayName)));
 					const pW = Math.max(...rows.map((r) => String(r.pending).length), String(totalPending).length);
@@ -236,15 +241,13 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 					lines.push(truncateToWidth(sepLine, width));
 
 					const totalLabel = theme.bold("Total");
-					const totalTaskCount = totalPending + totalCompleted;
-					const pct = totalTaskCount > 0 ? Math.round((totalCompleted / totalTaskCount) * 100) : 0;
-					const pctLabel = theme.fg("success", padRight(`${pct}%`, 9));
+					const pctLabel = theme.fg("success", padRight(`${progress.percent}%`, 9));
 					const tpNum = String(totalPending).padStart(pW);
 					const tcNum = String(totalCompleted).padStart(cW);
 					const totalUsagePadded = totalUsageStr.padStart(usageW);
 					const totalSuffix = theme.fg(
 						"muted",
-						` \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${totalUsagePadded}`,
+						` \u00b7 ${totalInProgress} in progress \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${totalUsagePadded}`,
 					);
 					// nameColWidth + 4 = " ◆ " + name; then " " + pctLabel fills the status column
 					const totalRow = ` ${padRight(totalLabel, nameColWidth + 3)} ${pctLabel}${totalSuffix}`;

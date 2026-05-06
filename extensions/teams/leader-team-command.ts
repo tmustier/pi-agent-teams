@@ -243,7 +243,7 @@ export async function handleTeamCommand(opts: {
 		},
 
 		gc: async () => {
-			await handleTeamGcCommand({ ctx, rest });
+			await handleTeamGcCommand({ ctx, rest, teamId: activeTeamId });
 		},
 
 		prune: async () => {

@@ -6,8 +6,13 @@ export function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
+function hasExited(child: ChildProcess): boolean {
+	return child.exitCode !== null || child.signalCode !== null;
+}
+
 export async function terminateAll(children: readonly ChildProcess[]): Promise<void> {
 	for (const c of children) {
+		if (hasExited(c)) continue;
 		try {
 			c.kill("SIGTERM");
 		} catch {
@@ -18,10 +23,10 @@ export async function terminateAll(children: readonly ChildProcess[]): Promise<v
 	// Give them a moment to flush + exit.
 	const deadline = Date.now() + 10_000;
 	for (const c of children) {
-		while (c.exitCode === null && Date.now() < deadline) {
+		while (!hasExited(c) && Date.now() < deadline) {
 			await sleep(100);
 		}
-		if (c.exitCode === null) {
+		if (!hasExited(c)) {
 			try {
 				c.kill("SIGKILL");
 			} catch {

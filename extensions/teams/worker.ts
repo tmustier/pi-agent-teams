@@ -14,7 +14,7 @@ import {
 	isShutdownRequestMessage,
 	isTaskAssignmentMessage,
 } from "./protocol.js";
-import { getTeamDir } from "./paths.js";
+import { getTeamDir, validateTeamId } from "./paths.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
 import {
 	claimNextAvailableTask,
@@ -44,6 +44,7 @@ function teamDirFromEnv(): {
 	const teamId = process.env.PI_TEAMS_TEAM_ID;
 	const agentNameRaw = process.env.PI_TEAMS_AGENT_NAME;
 	if (!teamId || !agentNameRaw) return null;
+	if (validateTeamId(teamId)) return null;
 
 	const agentName = sanitizeName(agentNameRaw);
 	const taskListId = process.env.PI_TEAMS_TASK_LIST_ID ?? teamId;
@@ -481,6 +482,7 @@ export function runWorker(pi: ExtensionAPI): void {
 		completedTaskId?: string,
 		completedStatus?: "completed" | "failed",
 		failureReason?: string,
+		taskFailureReason?: string,
 	) => {
 		type IdleNotificationPayload = {
 			type: "idle_notification";
@@ -489,6 +491,7 @@ export function runWorker(pi: ExtensionAPI): void {
 			completedTaskId?: string;
 			completedStatus?: "completed" | "failed";
 			failureReason?: string;
+			taskFailureReason?: string;
 		};
 
 		const payload: IdleNotificationPayload = {
@@ -499,6 +502,7 @@ export function runWorker(pi: ExtensionAPI): void {
 		if (completedTaskId) payload.completedTaskId = completedTaskId;
 		if (completedStatus) payload.completedStatus = completedStatus;
 		if (failureReason) payload.failureReason = failureReason;
+		if (taskFailureReason) payload.taskFailureReason = taskFailureReason;
 
 		for (let attempt = 0; attempt < 3; attempt += 1) {
 			try {
@@ -607,6 +611,7 @@ export function runWorker(pi: ExtensionAPI): void {
 		let completedTaskId: string | undefined;
 		let completedStatus: "completed" | "failed" | undefined;
 		let failureReason: string | undefined;
+		let taskFailureReason: string | undefined;
 
 		try {
 			if (taskId) {
@@ -643,9 +648,16 @@ export function runWorker(pi: ExtensionAPI): void {
 					completedTaskId = taskId;
 					completedStatus = "failed";
 				} else {
-					await completeTask(teamDir, taskListId, taskId, agentName, rawResult);
+					const completion = await completeTask(teamDir, taskListId, taskId, agentName, rawResult);
 					completedTaskId = taskId;
-					completedStatus = "completed";
+					if (completion.ok) {
+						completedStatus = "completed";
+					} else {
+						completedStatus = "failed";
+						const owner = completion.task?.owner ? ` (current owner: ${completion.task.owner})` : "";
+						const status = completion.task?.status ? ` (status: ${completion.task.status})` : "";
+						taskFailureReason = `Task was not completed: ${completion.reason}${owner}${status}`;
+					}
 				}
 			}
 		} finally {
@@ -658,7 +670,7 @@ export function runWorker(pi: ExtensionAPI): void {
 
 		// Only tell the leader we're idle if we truly didn't start more work.
 		if (!isStreaming && !currentTaskId) {
-			await sendIdleNotification(completedTaskId, completedStatus, failureReason);
+			await sendIdleNotification(completedTaskId, completedStatus, failureReason, taskFailureReason);
 		}
 	});
 

@@ -112,8 +112,12 @@ export async function gcStaleTeamDirs(opts: {
 		const teamDir = path.join(teamsRootAbs, teamId);
 		let stat: fs.Stats;
 		try {
-			stat = await fs.promises.stat(teamDir);
+			stat = await fs.promises.lstat(teamDir);
 		} catch {
+			continue;
+		}
+		if (stat.isSymbolicLink()) {
+			skipped.push({ teamId, reason: "symlink" });
 			continue;
 		}
 		if (!stat.isDirectory()) continue;
