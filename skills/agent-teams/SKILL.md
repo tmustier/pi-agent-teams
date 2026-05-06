@@ -42,7 +42,7 @@ Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations
 | `message_dm` | `name`, `message` | Mailbox DM. `urgent=true` interrupts active turns. |
 | `message_broadcast` | `message` | Mailbox broadcast. `urgent=true` interrupts active turns. |
 | `message_steer` | `name`, `message` | RPC steer for running teammate. |
-| `member_spawn` | `name` | Supports context/workspace/model/thinking/plan options. |
+| `member_spawn` | `name` or `teammates` | Spawn one teammate by `name` or many via `teammates: [...]`; supports context/workspace/model/thinking/plan options. Stopped/error handles with the same name are replaced so teammates can be turned back on. |
 | `member_shutdown` | `name` or `all=true` | Graceful mailbox shutdown request. |
 | `member_kill` | `name` | Force-stop RPC teammate. |
 | `member_prune` | _(none)_ | Mark stale workers offline (`all=true` to force). |
@@ -57,6 +57,7 @@ Examples:
 
 ```
 teams({ action: "delegate", tasks: [{ text: "Implement auth", assignee: "alice" }] })
+teams({ action: "member_spawn", teammates: ["alice", "bob", "carol"] })
 teams({ action: "task_assign", taskId: "12", assignee: "alice" })
 teams({ action: "task_dep_add", taskId: "12", depId: "7" })
 teams({ action: "message_broadcast", message: "Sync: finishing this milestone" })

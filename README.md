@@ -169,7 +169,7 @@ Set `urgent=true` only for time-sensitive interruptions. Teammates should not ed
 | `message_dm` | `name`, `message` | Send mailbox DM to one teammate. Set `urgent=true` to interrupt their active turn. |
 | `message_broadcast` | `message` | Send mailbox message to all discovered workers. Set `urgent=true` to interrupt active turns. |
 | `message_steer` | `name`, `message` | Send steer instruction to a running teammate (RPC directly, tmux via urgent mailbox). |
-| `member_spawn` | `name` | Spawn one teammate (supports context/workspace/model/thinking/plan options; uses tmux panes when `PI_TEAMS_SPAWN_MODE=tmux`). |
+| `member_spawn` | `name` or `teammates` | Spawn one teammate by `name` or many via `teammates: [...]` (supports context/workspace/model/thinking/plan options; uses tmux panes when `PI_TEAMS_SPAWN_MODE=tmux`). Stopped/error handles with the same name are replaced so teammates can be turned back on. |
 | `member_status` | optional `name` | Real-time worker status: activity, time in state, stall detection, tool use, tokens, last message. Omit name for all-worker summary. |
 | `member_shutdown` | `name` or `all=true` | Request graceful shutdown via mailbox handshake. |
 | `member_kill` | `name` | Force-stop one teammate and unassign active tasks (kills tmux pane in tmux mode). |

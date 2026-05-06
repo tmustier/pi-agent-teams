@@ -550,18 +550,14 @@ export function registerTeamsTool(opts: {
 			}
 
 			if (action === "member_spawn") {
-				const nameRaw = params.name?.trim();
-				const name = sanitizeName(nameRaw ?? "");
-				if (!name) {
+				const requestedNames = uniqueNames([
+					...(params.teammates ?? []),
+					...(params.name ? [params.name] : []),
+				]);
+				if (requestedNames.length === 0) {
 					return {
-						content: [{ type: "text", text: "member_spawn requires name" }],
-						details: { action, name: nameRaw },
-					};
-				}
-				if (teammates.has(name)) {
-					return {
-						content: [{ type: "text", text: `${formatMemberDisplayName(style, name)} is already running` }],
-						details: { action, teamId, name, alreadyRunning: true },
+						content: [{ type: "text", text: "member_spawn requires name (or teammates)" }],
+						details: { action, name: params.name, teammates: params.teammates },
 					};
 				}
 
@@ -569,41 +565,71 @@ export function registerTeamsTool(opts: {
 				const workspaceMode: WorkspaceMode = params.workspaceMode === "worktree" ? "worktree" : "shared";
 				const modelOverride = params.model?.trim();
 				const spawnModel = modelOverride && modelOverride.length > 0 ? modelOverride : undefined;
-				const res = await spawnTeammate(ctx, {
-					name,
-					mode: contextMode,
-					workspaceMode,
-					model: spawnModel,
-					thinking: params.thinking,
-					planRequired: params.planRequired === true,
-				});
+				const spawned: Array<{
+					name: string;
+					mode: ContextMode;
+					workspaceMode: WorkspaceMode;
+					model?: string;
+					thinking?: string;
+					warnings: string[];
+				}> = [];
+				const alreadyRunning: string[] = [];
+				const failures: Array<{ name: string; error: string }> = [];
+				const lines: string[] = [];
 
-				if (!res.ok) {
-					return {
-						content: [{ type: "text", text: `Failed to spawn ${formatMemberDisplayName(style, name)}: ${res.error}` }],
-						details: { action, teamId, name, error: res.error },
-					};
-				}
+				for (const name of requestedNames) {
+					const existing = teammates.get(name);
+					if (existing) {
+						if (existing.status === "stopped" || existing.status === "error") {
+							teammates.delete(name);
+							await setMemberStatus(teamDir, name, "offline", { meta: { replacedForRestartAt: new Date().toISOString() } });
+						} else {
+							alreadyRunning.push(name);
+							lines.push(`${formatMemberDisplayName(style, name)} is already running`);
+							continue;
+						}
+					}
 
-				await refreshUi();
-				const lines: string[] = [
-					`Spawned ${formatMemberDisplayName(style, res.name)} (${res.mode}/${res.workspaceMode})`,
-				];
-				if (res.model) lines.push(`model: ${res.model}`);
-				if (res.thinking) lines.push(`thinking: ${res.thinking}`);
-				if (res.note) lines.push(`note: ${res.note}`);
-				for (const w of res.warnings) lines.push(`warning: ${w}`);
-				return {
-					content: [{ type: "text", text: lines.join("\n") }],
-					details: {
-						action,
-						teamId,
+					const res = await spawnTeammate(ctx, {
+						name,
+						mode: contextMode,
+						workspaceMode,
+						model: spawnModel,
+						thinking: params.thinking,
+						planRequired: params.planRequired === true,
+					});
+
+					if (!res.ok) {
+						failures.push({ name, error: res.error });
+						lines.push(`Failed to spawn ${formatMemberDisplayName(style, name)}: ${res.error}`);
+						continue;
+					}
+
+					spawned.push({
 						name: res.name,
 						mode: res.mode,
 						workspaceMode: res.workspaceMode,
 						model: res.model,
 						thinking: res.thinking,
 						warnings: res.warnings,
+					});
+					lines.push(`Spawned ${formatMemberDisplayName(style, res.name)} (${res.mode}/${res.workspaceMode})`);
+					if (res.model) lines.push(`model: ${res.model}`);
+					if (res.thinking) lines.push(`thinking: ${res.thinking}`);
+					if (res.note) lines.push(`note: ${res.note}`);
+					for (const w of res.warnings) lines.push(`warning: ${w}`);
+				}
+
+				await refreshUi();
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: {
+						action,
+						teamId,
+						spawned,
+						alreadyRunning,
+						failures,
+						...(requestedNames.length === 1 && spawned.length === 1 ? spawned[0] : {}),
 					},
 				};
 			}

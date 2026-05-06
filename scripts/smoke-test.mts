@@ -73,7 +73,7 @@ import {
 	taskAssignmentPayload,
 } from "../extensions/teams/protocol.js";
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
-import { planDelegateTeammateNames } from "../extensions/teams/leader-teams-tool.js";
+import { planDelegateTeammateNames, registerTeamsTool } from "../extensions/teams/leader-teams-tool.js";
 import { sendPromptOrFollowUp } from "../extensions/teams/leader-messaging-commands.js";
 import { runWorker } from "../extensions/teams/worker.js";
 import { buildWorkerToolAllowlist, WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "../extensions/teams/worker-tools.js";
@@ -1830,6 +1830,75 @@ console.log("\n15. worker/leader messaging hardening");
 	});
 	assertEq(planned.join(","), "locksmith,messenger,ux-audit", "explicit task assignees plan exactly those teammates");
 	assert(!planned.some((name) => name.startsWith("agent")), "explicit task assignees do not spawn generic agent extras");
+
+	type RegisteredLeaderTool = {
+		name: string;
+		execute: (...args: unknown[]) => Promise<unknown>;
+	};
+	const leaderTools = new Map<string, RegisteredLeaderTool>();
+	const leaderFakePi = {
+		registerTool(tool: RegisteredLeaderTool) {
+			leaderTools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	const leaderTeammates = new Map<string, TeammateHandle>();
+	const spawnedNames: string[] = [];
+	const makeHandle = (name: string, status: TeammateHandle["status"] = "idle") => ({
+		name,
+		status,
+		lastAssistantText: "",
+		lastError: null,
+		currentTaskId: null,
+		lastStatusChangeAt: Date.now(),
+		lastEventAt: Date.now(),
+		onEvent: () => () => {},
+		onClose: () => () => {},
+		getStderr: () => "",
+		start: async () => {},
+		stop: async () => {},
+		prompt: async () => {},
+		steer: async () => {},
+		followUp: async () => {},
+		abort: async () => {},
+		getState: async () => ({}),
+		setSessionName: async () => {},
+	}) as TeammateHandle;
+	registerTeamsTool({
+		pi: leaderFakePi,
+		teammates: leaderTeammates,
+		spawnTeammate: async (_ctx, opts) => {
+			spawnedNames.push(opts.name);
+			leaderTeammates.set(opts.name, makeHandle(opts.name));
+			return { ok: true, name: opts.name, mode: opts.mode ?? "fresh", workspaceMode: opts.workspaceMode ?? "shared", warnings: [] };
+		},
+		getTeamId: () => "leader-tool-team",
+		getTaskListId: () => "leader-tool-team",
+		getTracker: () => new ActivityTracker(),
+		getTeamConfig: () => null,
+		refreshTasks: async () => {},
+		renderWidget: () => {},
+		hideWidget: () => {},
+		stopAllTeammates: async () => {},
+		pendingPlanApprovals: new Map(),
+	});
+	const leaderTool = leaderTools.get("teams");
+	assert(leaderTool !== undefined, "leader registers teams tool");
+	if (leaderTool) {
+		await leaderTool.execute("tc-spawn-many", { action: "member_spawn", teammates: ["alpha", "beta", "gamma"] }, undefined, undefined, {
+			cwd: tmpRoot,
+			sessionManager: { getSessionId: () => "leader-tool-team" },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assertEq(spawnedNames.join(","), "alpha,beta,gamma", "member_spawn accepts teammates array for multi-spawn");
+
+		leaderTeammates.set("alpha", makeHandle("alpha", "stopped"));
+		await leaderTool.execute("tc-restart", { action: "member_spawn", name: "alpha" }, undefined, undefined, {
+			cwd: tmpRoot,
+			sessionManager: { getSessionId: () => "leader-tool-team" },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assertEq(spawnedNames.filter((name) => name === "alpha").length, 2, "member_spawn can restart a stopped teammate with the same name");
+	}
 
 	let promptCalls = 0;
 	let followUpCalls = 0;

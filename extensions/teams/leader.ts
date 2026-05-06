@@ -609,6 +609,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			teammateEventUnsubs.delete(name);
 			tracker.reset(name);
 			transcriptTracker.reset(name);
+			teammates.delete(name);
 
 			if (currentTeamId !== leaderTeamId) return;
 			const effectiveTlId = taskListId ?? leaderTeamId;
