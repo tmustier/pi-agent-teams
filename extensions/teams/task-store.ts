@@ -26,6 +26,22 @@ function taskPath(taskListDir: string, taskId: string): string {
 	return path.join(taskListDir, `${sanitizeName(taskId)}.json`);
 }
 
+function taskListTransactionLockPath(taskListDir: string): string {
+	return path.join(taskListDir, ".transaction.lock");
+}
+
+async function withTaskFileLocks<T>(taskListDir: string, taskIds: string[], label: string, fn: () => Promise<T>): Promise<T> {
+	const lockPaths = uniqStrings(taskIds.map((id) => `${taskPath(taskListDir, id)}.lock`)).sort();
+	let run = fn;
+	for (let i = lockPaths.length - 1; i >= 0; i -= 1) {
+		const lockPath = lockPaths[i];
+		if (!lockPath) continue;
+		const next = run;
+		run = () => withLock(lockPath, next, { label: `${label}:${path.basename(lockPath)}` });
+	}
+	return await run();
+}
+
 async function ensureDir(p: string): Promise<void> {
 	await fs.promises.mkdir(p, { recursive: true });
 }
@@ -272,21 +288,41 @@ export async function startAssignedTask(
 	});
 }
 
+export type CompleteTaskResult =
+	| { ok: true; task: TeamTask }
+	| { ok: false; reason: "not_found" | "not_owner" | "already_completed"; task?: TeamTask };
+
 export async function completeTask(
 	teamDir: string,
 	taskListId: string,
 	taskId: string,
 	agentName: string,
 	result?: string,
-): Promise<TeamTask | null> {
-	return await updateTask(teamDir, taskListId, taskId, (cur) => {
-		if (cur.owner !== agentName) return cur;
-		if (cur.status === "completed") return cur;
-		const metadata = { ...(cur.metadata ?? {}) };
-		if (result) metadata.result = result;
-		metadata.completedAt = new Date().toISOString();
-		return { ...cur, status: "completed", metadata };
-	});
+): Promise<CompleteTaskResult> {
+	const dir = getTaskListDir(teamDir, taskListId);
+	const file = taskPath(dir, taskId);
+	const lock = `${file}.lock`;
+
+	await ensureDir(dir);
+
+	return await withLock(
+		lock,
+		async () => {
+			const curObj = await readJson(file);
+			const cur = coerceTask(curObj);
+			if (!cur) return { ok: false, reason: "not_found" };
+			if (cur.owner !== agentName) return { ok: false, reason: "not_owner", task: cur };
+			if (cur.status === "completed") return { ok: false, reason: "already_completed", task: cur };
+
+			const metadata = { ...(cur.metadata ?? {}) };
+			if (result) metadata.result = result;
+			metadata.completedAt = new Date().toISOString();
+			const next = { ...cur, status: "completed" as const, metadata, updatedAt: new Date().toISOString() };
+			await writeJsonAtomic(file, next);
+			return { ok: true, task: next };
+		},
+		{ label: `tasks:complete:${taskId}` },
+	);
 }
 
 export async function unassignTask(
@@ -403,24 +439,33 @@ export async function addTaskDependency(
 	if (!taskId || !depId) return { ok: false, error: "Missing task id or dependency id" };
 	if (taskId === depId) return { ok: false, error: "Task cannot depend on itself" };
 
-	const task = await getTask(teamDir, taskListId, taskId);
-	if (!task) return { ok: false, error: `Task not found: ${taskId}` };
-	const dep = await getTask(teamDir, taskListId, depId);
-	if (!dep) return { ok: false, error: `Dependency task not found: ${depId}` };
+	const dir = getTaskListDir(teamDir, taskListId);
+	await ensureDir(dir);
+	return await withLock(
+		taskListTransactionLockPath(dir),
+		async () => await withTaskFileLocks(dir, [taskId, depId], "tasks:dependency:add", async () => {
+			const taskFile = taskPath(dir, taskId);
+			const depFile = taskPath(dir, depId);
+			const task = coerceTask(await readJson(taskFile));
+			if (!task) return { ok: false, error: `Task not found: ${taskId}` };
+			const dep = coerceTask(await readJson(depFile));
+			if (!dep) return { ok: false, error: `Dependency task not found: ${depId}` };
 
-	const updatedTask = await updateTask(teamDir, taskListId, taskId, (cur) => ({
-		...cur,
-		blockedBy: uniqStrings([...(cur.blockedBy ?? []), depId]),
-	}));
-	if (!updatedTask) return { ok: false, error: `Task not found: ${taskId}` };
+			const now = new Date().toISOString();
+			const updatedTask = { ...task, blockedBy: uniqStrings([...(task.blockedBy ?? []), depId]), updatedAt: now };
+			const updatedDep = { ...dep, blocks: uniqStrings([...(dep.blocks ?? []), taskId]), updatedAt: now };
 
-	const updatedDep = await updateTask(teamDir, taskListId, depId, (cur) => ({
-		...cur,
-		blocks: uniqStrings([...(cur.blocks ?? []), taskId]),
-	}));
-	if (!updatedDep) return { ok: false, error: `Dependency task not found: ${depId}` };
-
-	return { ok: true, task: updatedTask, dependency: updatedDep };
+			await writeJsonAtomic(taskFile, updatedTask);
+			try {
+				await writeJsonAtomic(depFile, updatedDep);
+			} catch (err: unknown) {
+				await writeJsonAtomic(taskFile, task).catch(() => undefined);
+				throw err;
+			}
+			return { ok: true, task: updatedTask, dependency: updatedDep };
+		}),
+		{ label: `tasks:dependency:add:${taskId}:${depId}` },
+	);
 }
 
 /**
@@ -435,24 +480,33 @@ export async function removeTaskDependency(
 	if (!taskId || !depId) return { ok: false, error: "Missing task id or dependency id" };
 	if (taskId === depId) return { ok: false, error: "Task cannot remove itself as a dependency" };
 
-	const task = await getTask(teamDir, taskListId, taskId);
-	if (!task) return { ok: false, error: `Task not found: ${taskId}` };
-	const dep = await getTask(teamDir, taskListId, depId);
-	if (!dep) return { ok: false, error: `Dependency task not found: ${depId}` };
+	const dir = getTaskListDir(teamDir, taskListId);
+	await ensureDir(dir);
+	return await withLock(
+		taskListTransactionLockPath(dir),
+		async () => await withTaskFileLocks(dir, [taskId, depId], "tasks:dependency:remove", async () => {
+			const taskFile = taskPath(dir, taskId);
+			const depFile = taskPath(dir, depId);
+			const task = coerceTask(await readJson(taskFile));
+			if (!task) return { ok: false, error: `Task not found: ${taskId}` };
+			const dep = coerceTask(await readJson(depFile));
+			if (!dep) return { ok: false, error: `Dependency task not found: ${depId}` };
 
-	const updatedTask = await updateTask(teamDir, taskListId, taskId, (cur) => ({
-		...cur,
-		blockedBy: (cur.blockedBy ?? []).filter((x) => x !== depId),
-	}));
-	if (!updatedTask) return { ok: false, error: `Task not found: ${taskId}` };
+			const now = new Date().toISOString();
+			const updatedTask = { ...task, blockedBy: (task.blockedBy ?? []).filter((x) => x !== depId), updatedAt: now };
+			const updatedDep = { ...dep, blocks: (dep.blocks ?? []).filter((x) => x !== taskId), updatedAt: now };
 
-	const updatedDep = await updateTask(teamDir, taskListId, depId, (cur) => ({
-		...cur,
-		blocks: (cur.blocks ?? []).filter((x) => x !== taskId),
-	}));
-	if (!updatedDep) return { ok: false, error: `Dependency task not found: ${depId}` };
-
-	return { ok: true, task: updatedTask, dependency: updatedDep };
+			await writeJsonAtomic(taskFile, updatedTask);
+			try {
+				await writeJsonAtomic(depFile, updatedDep);
+			} catch (err: unknown) {
+				await writeJsonAtomic(taskFile, task).catch(() => undefined);
+				throw err;
+			}
+			return { ok: true, task: updatedTask, dependency: updatedDep };
+		}),
+		{ label: `tasks:dependency:remove:${taskId}:${depId}` },
+	);
 }
 
 export type TaskClearMode = "completed" | "all";

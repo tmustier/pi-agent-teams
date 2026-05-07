@@ -32,19 +32,79 @@ import {
 	unassignTasksForAgent,
 	updateTask,
 } from "./task-store.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import {
 	resolveDisplayStatus,
 	formatElapsed,
 	lastMessageSummary,
-	formatTokens,
+	formatUsageBreakdown,
+	getVisibleWorkerNames,
 	toolActivity,
 } from "./teams-ui-shared.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
 import type { DelegationTracker } from "./leader-inbox.js";
 
-type TeamsToolDelegateTask = { text: string; assignee?: string };
+export type TeamsToolDelegateTask = { text: string; assignee?: string };
+
+function uniqueNames(names: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const name of names) {
+		const sanitized = sanitizeName(name);
+		if (!sanitized || seen.has(sanitized)) continue;
+		seen.add(sanitized);
+		out.push(sanitized);
+	}
+	return out;
+}
+
+function pickAutoNames(style: TeamsStyle, count: number, taken: Set<string>): string[] {
+	if (count <= 0) return [];
+	const naming = getTeamsNamingRules(style);
+	return naming.autoNameStrategy.kind === "agent"
+		? pickAgentNames(count, taken)
+		: pickNamesFromPool({
+			pool: naming.autoNameStrategy.pool,
+			count,
+			taken,
+			fallbackBase: naming.autoNameStrategy.fallbackBase,
+		});
+}
+
+export function planDelegateTeammateNames(opts: {
+	inputTasks: TeamsToolDelegateTask[];
+	explicitTeammates?: string[];
+	existingTeammateNames?: Iterable<string>;
+	style: TeamsStyle;
+	maxTeammates?: number;
+}): string[] {
+	const maxTeammates = Math.max(1, Math.min(16, opts.maxTeammates ?? 4));
+	const existing = uniqueNames(Array.from(opts.existingTeammateNames ?? []));
+	const explicit = uniqueNames(opts.explicitTeammates ?? []);
+	if (explicit.length) return explicit;
+
+	const taskAssignees = uniqueNames(opts.inputTasks.map((t) => t.assignee ?? ""));
+	const unassignedCount = opts.inputTasks.filter((t) => !sanitizeName(t.assignee ?? "")).length;
+
+	if (taskAssignees.length) {
+		const names = [...taskAssignees];
+		const existingForUnassigned = existing.filter((name) => !names.includes(name)).slice(0, unassignedCount);
+		names.push(...existingForUnassigned);
+
+		const remainingUnassigned = unassignedCount - existingForUnassigned.length;
+		if (remainingUnassigned > 0) {
+			const taken = new Set([...existing, ...names]);
+			names.push(...pickAutoNames(opts.style, Math.min(maxTeammates, remainingUnassigned), taken));
+		}
+
+		return names;
+	}
+
+	if (existing.length) return existing;
+
+	return pickAutoNames(opts.style, Math.min(maxTeammates, opts.inputTasks.length), new Set(existing));
+}
 
 function describeModelSource(source: TeammateModelSource): string {
 	if (source === "override") return "override";
@@ -163,7 +223,7 @@ type TeamsToolParamsType = Static<typeof TeamsToolParamsSchema>;
 
 export function registerTeamsTool(opts: {
 	pi: ExtensionAPI;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	spawnTeammate: SpawnTeammateFn;
 	getTeamId: (ctx: Parameters<SpawnTeammateFn>[0]) => string;
 	getTaskListId: () => string | null;
@@ -184,7 +244,7 @@ export function registerTeamsTool(opts: {
 		description: [
 			"Spawn comrade agents and delegate tasks. Each comrade is a child Pi process that executes work autonomously and reports back.",
 			"You can also mutate existing tasks (assign, unassign, set status, dependencies), send team messages, run teammate lifecycle actions, and manage hooks/model policy without user slash commands.",
-			"Use member_status (with optional name) to get real-time worker state: activity, time in state, stall detection, tool use, tokens, and last message summary.",
+			"Use member_status (with optional name) to get real-time worker state: activity, time in state, stall detection, tool use, Pi-like usage breakdown, and last message summary.",
 			"Use team_done to end a team run when all tasks are complete (stops teammates, hides widget).",
 			"Provide a list of tasks with optional assignees; comrades are spawned automatically and assigned round-robin if unspecified.",
 			"Options: contextMode=branch (clone session context), workspaceMode=worktree (git worktree isolation).",
@@ -490,18 +550,14 @@ export function registerTeamsTool(opts: {
 			}
 
 			if (action === "member_spawn") {
-				const nameRaw = params.name?.trim();
-				const name = sanitizeName(nameRaw ?? "");
-				if (!name) {
+				const requestedNames = uniqueNames([
+					...(params.teammates ?? []),
+					...(params.name ? [params.name] : []),
+				]);
+				if (requestedNames.length === 0) {
 					return {
-						content: [{ type: "text", text: "member_spawn requires name" }],
-						details: { action, name: nameRaw },
-					};
-				}
-				if (teammates.has(name)) {
-					return {
-						content: [{ type: "text", text: `${formatMemberDisplayName(style, name)} is already running` }],
-						details: { action, teamId, name, alreadyRunning: true },
+						content: [{ type: "text", text: "member_spawn requires name (or teammates)" }],
+						details: { action, name: params.name, teammates: params.teammates },
 					};
 				}
 
@@ -509,41 +565,71 @@ export function registerTeamsTool(opts: {
 				const workspaceMode: WorkspaceMode = params.workspaceMode === "worktree" ? "worktree" : "shared";
 				const modelOverride = params.model?.trim();
 				const spawnModel = modelOverride && modelOverride.length > 0 ? modelOverride : undefined;
-				const res = await spawnTeammate(ctx, {
-					name,
-					mode: contextMode,
-					workspaceMode,
-					model: spawnModel,
-					thinking: params.thinking,
-					planRequired: params.planRequired === true,
-				});
+				const spawned: Array<{
+					name: string;
+					mode: ContextMode;
+					workspaceMode: WorkspaceMode;
+					model?: string;
+					thinking?: string;
+					warnings: string[];
+				}> = [];
+				const alreadyRunning: string[] = [];
+				const failures: Array<{ name: string; error: string }> = [];
+				const lines: string[] = [];
 
-				if (!res.ok) {
-					return {
-						content: [{ type: "text", text: `Failed to spawn ${formatMemberDisplayName(style, name)}: ${res.error}` }],
-						details: { action, teamId, name, error: res.error },
-					};
-				}
+				for (const name of requestedNames) {
+					const existing = teammates.get(name);
+					if (existing) {
+						if (existing.status === "stopped" || existing.status === "error") {
+							teammates.delete(name);
+							await setMemberStatus(teamDir, name, "offline", { meta: { replacedForRestartAt: new Date().toISOString() } });
+						} else {
+							alreadyRunning.push(name);
+							lines.push(`${formatMemberDisplayName(style, name)} is already running`);
+							continue;
+						}
+					}
 
-				await refreshUi();
-				const lines: string[] = [
-					`Spawned ${formatMemberDisplayName(style, res.name)} (${res.mode}/${res.workspaceMode})`,
-				];
-				if (res.model) lines.push(`model: ${res.model}`);
-				if (res.thinking) lines.push(`thinking: ${res.thinking}`);
-				if (res.note) lines.push(`note: ${res.note}`);
-				for (const w of res.warnings) lines.push(`warning: ${w}`);
-				return {
-					content: [{ type: "text", text: lines.join("\n") }],
-					details: {
-						action,
-						teamId,
+					const res = await spawnTeammate(ctx, {
+						name,
+						mode: contextMode,
+						workspaceMode,
+						model: spawnModel,
+						thinking: params.thinking,
+						planRequired: params.planRequired === true,
+					});
+
+					if (!res.ok) {
+						failures.push({ name, error: res.error });
+						lines.push(`Failed to spawn ${formatMemberDisplayName(style, name)}: ${res.error}`);
+						continue;
+					}
+
+					spawned.push({
 						name: res.name,
 						mode: res.mode,
 						workspaceMode: res.workspaceMode,
 						model: res.model,
 						thinking: res.thinking,
 						warnings: res.warnings,
+					});
+					lines.push(`Spawned ${formatMemberDisplayName(style, res.name)} (${res.mode}/${res.workspaceMode})`);
+					if (res.model) lines.push(`model: ${res.model}`);
+					if (res.thinking) lines.push(`thinking: ${res.thinking}`);
+					if (res.note) lines.push(`note: ${res.note}`);
+					for (const w of res.warnings) lines.push(`warning: ${w}`);
+				}
+
+				await refreshUi();
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: {
+						action,
+						teamId,
+						spawned,
+						alreadyRunning,
+						failures,
+						...(requestedNames.length === 1 && spawned.length === 1 ? spawned[0] : {}),
 					},
 				};
 			}
@@ -561,16 +647,9 @@ export function registerTeamsTool(opts: {
 					const cfgByName = new Map<string, (typeof cfgMembers)[number]>();
 					for (const m of cfgMembers) cfgByName.set(m.name, m);
 
-					const workerNames = new Set<string>();
-					for (const n of teammates.keys()) workerNames.add(n);
-					for (const m of cfgMembers) {
-						if (m.role === "worker" && m.status === "online") workerNames.add(m.name);
-					}
-					for (const t of allTasks) {
-						if (t.owner && t.owner !== (teamCfg?.leadName ?? "") && t.status === "in_progress") workerNames.add(t.owner);
-					}
+					const workerNames = getVisibleWorkerNames({ teammates, teamConfig: teamCfg, tasks: allTasks });
 
-					if (workerNames.size === 0) {
+					if (workerNames.length === 0) {
 						return {
 							content: [{ type: "text", text: `No ${strings.memberTitle.toLowerCase()}s to report on` }],
 							details: { action, teamId, workers: [] },
@@ -579,7 +658,7 @@ export function registerTeamsTool(opts: {
 
 					const workers: Array<Record<string, unknown>> = [];
 					const lines: string[] = [];
-					for (const n of Array.from(workerNames).sort()) {
+					for (const n of workerNames) {
 						const rpc = teammates.get(n);
 						const memberCfg = cfgByName.get(n);
 						const displayStatus = resolveDisplayStatus(rpc, memberCfg);
@@ -590,7 +669,8 @@ export function registerTeamsTool(opts: {
 						const msgPreview = lastMessageSummary(rpc, 80);
 						const model = memberCfg?.meta?.["model"];
 
-						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${currentTool ? ` (${currentTool})` : ""} · ${formatTokens(activity.totalTokens)} tokens`);
+						const usage = formatUsageBreakdown(activity.usage, { fallbackTotal: activity.totalTokens });
+						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${currentTool ? ` (${currentTool})` : ""} · ${usage}`);
 						if (msgPreview) lines.push(`  last: ${msgPreview}`);
 
 						workers.push({
@@ -603,6 +683,8 @@ export function registerTeamsTool(opts: {
 							toolUseCount: activity.toolUseCount,
 							turnCount: activity.turnCount,
 							totalTokens: activity.totalTokens,
+							usage: activity.usage,
+							usageSummary: usage,
 							model: typeof model === "string" ? model : undefined,
 						});
 					}
@@ -616,7 +698,9 @@ export function registerTeamsTool(opts: {
 				// Single worker status
 				const rpc = teammates.get(name);
 				const memberCfg = (teamCfg?.members ?? []).find((m) => m.name === name);
-				if (!rpc && !memberCfg) {
+				const allTasks = await listTasks(teamDir, effectiveTlId);
+				const owned = allTasks.filter((t) => t.owner === name);
+				if (!rpc && !memberCfg && !owned.some((t) => t.status === "in_progress")) {
 					return {
 						content: [{ type: "text", text: `Unknown ${strings.memberTitle.toLowerCase()}: ${name}` }],
 						details: { action, name },
@@ -630,8 +714,6 @@ export function registerTeamsTool(opts: {
 				const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
 				const currentTool = toolActivity(activity.currentToolName);
 				const msgPreview = lastMessageSummary(rpc, 120);
-				const allTasks = await listTasks(teamDir, effectiveTlId);
-				const owned = allTasks.filter((t) => t.owner === name);
 				const activeTask = owned.find((t) => t.status === "in_progress");
 				const model = memberCfg?.meta?.["model"];
 				const cwd = memberCfg?.cwd;
@@ -641,7 +723,7 @@ export function registerTeamsTool(opts: {
 					`time in state: ${elapsed || "(unknown)"}`,
 					`last event: ${noEventFor || "(unknown)"} ago`,
 					`current activity: ${currentTool || "(none)"}`,
-					`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
+					`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · usage: ${formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens })}`,
 				];
 				if (typeof model === "string" && model) lines.push(`model: ${model}`);
 				if (cwd) lines.push(`cwd: ${cwd}`);
@@ -666,6 +748,8 @@ export function registerTeamsTool(opts: {
 						toolUseCount: activity.toolUseCount,
 						turnCount: activity.turnCount,
 						totalTokens: activity.totalTokens,
+						usage: activity.usage,
+						usageSummary: formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens }),
 						model: typeof model === "string" ? model : undefined,
 						activeTaskId: activeTask?.id,
 						tasks: {
@@ -1188,31 +1272,13 @@ export function registerTeamsTool(opts: {
 			const spawnModel = modelOverride && modelOverride.length > 0 ? modelOverride : undefined;
 			const spawnThinking = params.thinking;
 
-			let teammateNames: string[] = [];
-			const explicit = params.teammates;
-			if (explicit && explicit.length) {
-				teammateNames = explicit.map((n) => sanitizeName(n)).filter((n) => n.length > 0);
-			}
-
-			if (teammateNames.length === 0 && teammates.size > 0) {
-				teammateNames = Array.from(teammates.keys());
-			}
-
-			if (teammateNames.length === 0) {
-				const maxTeammates = Math.max(1, Math.min(16, params.maxTeammates ?? 4));
-				const count = Math.min(maxTeammates, inputTasks.length);
-				const taken = new Set(teammates.keys());
-				const naming = getTeamsNamingRules(style);
-				teammateNames =
-					naming.autoNameStrategy.kind === "agent"
-						? pickAgentNames(count, taken)
-						: pickNamesFromPool({
-							pool: naming.autoNameStrategy.pool,
-							count,
-							taken,
-							fallbackBase: naming.autoNameStrategy.fallbackBase,
-						});
-			}
+			const teammateNames = planDelegateTeammateNames({
+				inputTasks,
+				explicitTeammates: params.teammates,
+				existingTeammateNames: teammates.keys(),
+				style,
+				maxTeammates: params.maxTeammates,
+			});
 
 			const spawned: string[] = [];
 			const warnings: string[] = [];
@@ -1249,7 +1315,7 @@ export function registerTeamsTool(opts: {
 					continue;
 				}
 
-				const explicitAssignee = t.assignee ? sanitizeName(t.assignee) : undefined;
+				const explicitAssignee = sanitizeName(t.assignee ?? "") || undefined;
 				const assignee = explicitAssignee ?? teammateNames[rr++ % teammateNames.length];
 				if (!assignee) {
 					warnings.push(`No assignee available for task: ${text.slice(0, 60)}`);

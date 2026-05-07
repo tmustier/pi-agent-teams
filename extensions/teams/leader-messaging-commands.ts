@@ -5,14 +5,35 @@ import { getTeamDir } from "./paths.js";
 import { TEAM_MAILBOX_NS } from "./protocol.js";
 import { ensureTeamConfig } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+
+function isAlreadyProcessingPromptError(err: unknown): boolean {
+	const msg = err instanceof Error ? err.message : String(err);
+	return msg.toLowerCase().includes("already processing");
+}
+
+export async function sendPromptOrFollowUp(t: TeammateHandle, message: string): Promise<"prompt" | "followUp" | "followUpRetry"> {
+	if (t.status === "streaming") {
+		await t.followUp(message);
+		return "followUp";
+	}
+
+	try {
+		await t.prompt(message);
+		return "prompt";
+	} catch (err: unknown) {
+		if (!isAlreadyProcessingPromptError(err)) throw err;
+		await t.followUp(message);
+		return "followUpRetry";
+	}
+}
 
 export async function handleTeamSendCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	style: TeamsStyle;
 	renderWidget: () => void;
 }): Promise<void> {
@@ -31,8 +52,7 @@ export async function handleTeamSendCommand(opts: {
 		ctx.ui.notify(`Unknown ${strings.memberTitle.toLowerCase()}: ${name}`, "error");
 		return;
 	}
-	if (t.status === "streaming") await t.followUp(msg);
-	else await t.prompt(msg);
+	await sendPromptOrFollowUp(t, msg);
 	ctx.ui.notify(`Sent to ${name}`, "info");
 	renderWidget();
 }
@@ -40,7 +60,7 @@ export async function handleTeamSendCommand(opts: {
 export async function handleTeamSteerCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	style: TeamsStyle;
 	renderWidget: () => void;
 }): Promise<void> {
@@ -98,7 +118,7 @@ export async function handleTeamBroadcastCommand(opts: {
 	ctx: ExtensionCommandContext;
 	rest: string[];
 	teamId: string;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	leadName: string;
 	style: TeamsStyle;
 	refreshTasks: () => Promise<void>;

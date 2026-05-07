@@ -2,7 +2,7 @@ import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
-import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
+import type { TeammateHandle, TeammateStatus } from "./teammate-rpc.js";
 import {
 	areTeamsHooksEnabled,
 	getTeamsHookFailureAction,
@@ -93,7 +93,7 @@ function getStallThresholdMs(): number {
  * - Its transport status is "streaming" (i.e. not idle/stopped/error)
  * - No agent event has been received for > stallThresholdMs
  */
-export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): DisplayStatus {
+export function resolveDisplayStatus(rpc: TeammateHandle | undefined, cfg: TeamMember | undefined): DisplayStatus {
 	if (!rpc) return cfg?.status === "online" ? "idle" : "stopped";
 
 	if (rpc.status === "streaming") {
@@ -103,7 +103,7 @@ export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMemb
 	return rpc.status;
 }
 
-export function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
+export function resolveStatus(rpc: TeammateHandle | undefined, cfg: TeamMember | undefined): TeammateStatus {
 	if (rpc) return rpc.status;
 	return cfg?.status === "online" ? "idle" : "stopped";
 }
@@ -126,7 +126,7 @@ export function formatElapsed(ms: number): string {
 /**
  * Get a compact summary of the last assistant text (first 100 visible chars).
  */
-export function lastMessageSummary(rpc: TeammateRpc | undefined, maxLen: number = 100): string {
+export function lastMessageSummary(rpc: TeammateHandle | undefined, maxLen: number = 100): string {
 	if (!rpc) return "";
 	const raw = rpc.lastAssistantText;
 	if (!raw) return "";
@@ -141,13 +141,72 @@ export function formatTokens(n: number): string {
 	return String(n);
 }
 
+export type UsageBreakdownLike = {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+};
+
+export function addUsageBreakdown(a: UsageBreakdownLike, b: UsageBreakdownLike): UsageBreakdownLike {
+	return {
+		input: a.input + b.input,
+		output: a.output + b.output,
+		cacheRead: a.cacheRead + b.cacheRead,
+		cacheWrite: a.cacheWrite + b.cacheWrite,
+		cost: a.cost + b.cost,
+	};
+}
+
+export function isUsageBreakdownEmpty(usage: UsageBreakdownLike): boolean {
+	return usage.input === 0 && usage.output === 0 && usage.cacheRead === 0 && usage.cacheWrite === 0 && usage.cost === 0;
+}
+
+export function formatUsageBreakdown(usage: UsageBreakdownLike, opts: { includeCost?: boolean; fallbackTotal?: number } = {}): string {
+	const parts: string[] = [];
+	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
+	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
+	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
+	if (opts.includeCost && usage.cost) parts.push(`$${usage.cost.toFixed(3)}`);
+	if (parts.length > 0) return parts.join(" ");
+	if (opts.fallbackTotal && opts.fallbackTotal > 0) return `${formatTokens(opts.fallbackTotal)} total`;
+	return "0";
+}
+
+export function formatAggregatedUsageBreakdown(
+	usage: UsageBreakdownLike,
+	fallbackOnlyTotal: number,
+	opts: { includeCost?: boolean } = {},
+): string {
+	const base = formatUsageBreakdown(usage, { ...opts, fallbackTotal: fallbackOnlyTotal });
+	if (fallbackOnlyTotal > 0 && !isUsageBreakdownEmpty(usage)) return `${base} + ${formatTokens(fallbackOnlyTotal)} total`;
+	return base;
+}
+
+export function getTaskProgressSummary(tasks: readonly TeamTask[]): {
+	pending: number;
+	inProgress: number;
+	completed: number;
+	total: number;
+	percent: number;
+} {
+	const pending = tasks.filter((t) => t.status === "pending").length;
+	const inProgress = tasks.filter((t) => t.status === "in_progress").length;
+	const completed = tasks.filter((t) => t.status === "completed").length;
+	const total = pending + inProgress + completed;
+	const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+	return { pending, inProgress, completed, total, percent };
+}
+
 /**
  * Check if all tasks are completed and all teammates are idle/stopped.
  * Used by the widget (done hint) and leader (auto-done detection).
  */
 export function isTeamDone(
 	tasks: readonly TeamTask[],
-	teammates: ReadonlyMap<string, TeammateRpc>,
+	teammates: ReadonlyMap<string, TeammateHandle>,
 ): boolean {
 	if (tasks.length === 0) return false;
 	const pending = tasks.filter((t) => t.status === "pending").length;
@@ -208,7 +267,7 @@ export function getMemberThinking(member: TeamMember | undefined): string | null
  * - owning an in-progress task (even if RPC is disconnected)
  */
 export function getVisibleWorkerNames(opts: {
-	teammates: ReadonlyMap<string, TeammateRpc>;
+	teammates: ReadonlyMap<string, TeammateHandle>;
 	teamConfig: TeamConfig | null;
 	tasks: readonly TeamTask[];
 }): string[] {

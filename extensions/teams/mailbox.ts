@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { withLock } from "./fs-lock.js";
+import { withLock, type LockOptions } from "./fs-lock.js";
 import { sanitizeName } from "./names.js";
 
 export interface MailboxMessage {
@@ -13,6 +13,11 @@ export interface MailboxMessage {
 	 *  even if the agent is mid-turn, rather than queueing for the next idle window. */
 	urgent?: boolean;
 }
+
+const MAILBOX_LOCK_OPTIONS = {
+	recoverAbandoned: true,
+	invalidLockGraceMs: 500,
+} satisfies LockOptions;
 
 function inboxDir(teamDir: string, namespace: string): string {
 	return path.join(teamDir, "mailboxes", sanitizeName(namespace), "inboxes");
@@ -89,7 +94,7 @@ export async function writeToMailbox(
 			arr.push(m);
 			await writeJsonAtomic(inboxPath, arr);
 		},
-		{ label: `mailbox:write:${namespace}:${recipient}` },
+		{ ...MAILBOX_LOCK_OPTIONS, label: `mailbox:write:${namespace}:${recipient}` },
 	);
 }
 
@@ -125,7 +130,7 @@ export async function popUnreadMessages(teamDir: string, namespace: string, agen
 				if (unread.length) await writeJsonAtomic(inboxPath, updated);
 				return unread;
 			},
-			{ label: `mailbox:pop:${namespace}:${agentName}` },
+			{ ...MAILBOX_LOCK_OPTIONS, label: `mailbox:pop:${namespace}:${agentName}` },
 		);
 	} catch (err: unknown) {
 		// In practice this can happen if a previous process crashed and left a non-stale

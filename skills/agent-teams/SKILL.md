@@ -42,7 +42,7 @@ Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations
 | `message_dm` | `name`, `message` | Mailbox DM. `urgent=true` interrupts active turns. |
 | `message_broadcast` | `message` | Mailbox broadcast. `urgent=true` interrupts active turns. |
 | `message_steer` | `name`, `message` | RPC steer for running teammate. |
-| `member_spawn` | `name` | Supports context/workspace/model/thinking/plan options. |
+| `member_spawn` | `name` or `teammates` | Spawn one teammate by `name` or many via `teammates: [...]`; supports context/workspace/model/thinking/plan options. Stopped/error handles with the same name are replaced so teammates can be turned back on. |
 | `member_shutdown` | `name` or `all=true` | Graceful mailbox shutdown request. |
 | `member_kill` | `name` | Force-stop RPC teammate. |
 | `member_prune` | _(none)_ | Mark stale workers offline (`all=true` to force). |
@@ -57,6 +57,7 @@ Examples:
 
 ```
 teams({ action: "delegate", tasks: [{ text: "Implement auth", assignee: "alice" }] })
+teams({ action: "member_spawn", teammates: ["alice", "bob", "carol"] })
 teams({ action: "task_assign", taskId: "12", assignee: "alice" })
 teams({ action: "task_dep_add", taskId: "12", depId: "7" })
 teams({ action: "message_broadcast", message: "Sync: finishing this milestone" })
@@ -80,6 +81,8 @@ For more control, use `/team spawn`:
 /team spawn carol fresh worktree  # git worktree isolation
 /team spawn dave plan          # plan-required mode (read-only until approved)
 ```
+
+Interactive tmux panes are opt-in. When the leader runs inside tmux with `PI_TEAMS_SPAWN_MODE=tmux`, all spawn paths (`/team spawn`, `member_spawn`, `delegate`, `/swarm`) create full interactive Pi panes dynamically. The leader stays on the left and teammate panes tile on the right.
 
 ## Task management
 
@@ -106,12 +109,12 @@ Teammates auto-claim unassigned, unblocked tasks by default.
 /team dm <name> --urgent <msg...>     # urgent DM — interrupts active turn via steering
 /team broadcast <msg...>              # message all teammates
 /team broadcast --urgent <msg...>     # urgent broadcast — interrupts all active turns
-/team send <name> <msg...>            # RPC-based (immediate, for spawned teammates)
+/team send <name> <msg...>            # immediate for RPC; mailbox-backed for tmux teammates
 ```
 
 Urgent messages (`--urgent` or `urgent=true` in tool calls) interrupt a teammate's active turn via steering instead of waiting for idle. Use sparingly — only for time-sensitive coordination like "stop using library X, it's broken".
 
-Teammates can also message each other directly via the `team_message` tool (with optional `urgent` flag), with the leader CC'd.
+Teammates can message each other directly via the `team_message` tool (with optional `urgent` flag), with the leader CC'd. Teammates should message the leader directly via the `message_lead` tool; they must not edit mailbox JSON or `.lock` files manually.
 
 ## Governance modes
 
@@ -195,3 +198,4 @@ Teammates and the leader communicate via JSON messages with a `type` field:
 | `plan_approved` | leader -> teammate | Proceed with implementation |
 | `plan_rejected` | leader -> teammate | Revise plan (includes feedback) |
 | `peer_dm_sent` | teammate -> leader | CC notification of peer message |
+| plain DM (`message_lead`) | teammate -> leader | Direct teammate question/status/blocker routed as `[Team DM]` |

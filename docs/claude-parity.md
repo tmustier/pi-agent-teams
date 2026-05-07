@@ -47,7 +47,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Self-claim | Comrades self-claim next unassigned, unblocked task; file locking | ✅ | `claimNextAvailableTask()` + locks; enabled by default (`PI_TEAMS_DEFAULT_AUTO_CLAIM=1`). | P0 |
 | Explicit assign | Lead assigns task to comrade | ✅ | `/team task assign` sets owner + pings via mailbox. | P0 |
 | "Message" vs "broadcast" | Send to one comrade or all comrades | ✅ | `/team dm` + `/team broadcast` use mailbox; `/team send` uses RPC. Recipients = config workers + RPC map + active task owners. | P0 |
-| Comrade↔comrade messaging | Comrades message each other directly | ✅ | Worker tool `team_message` (with `urgent` flag for mid-turn interrupts); messages via mailbox + CC leader via `peer_dm_sent`. | P1 |
+| Comrade↔comrade messaging | Comrades message each other directly | ✅ | Worker tool `team_message` (with `urgent` flag for mid-turn interrupts); messages via mailbox + CC leader via `peer_dm_sent`. Lead-directed messages use worker tool `message_lead` and route to the leader as `[Team DM]`. | P1 |
 | Display modes | In-process selection (Shift+Up/Down); split panes (tmux/iTerm) | ❌ | Pi has widget/panel + commands, but no terminal-level comrade navigation/panes. | P2 |
 | Delegate mode | Lead restricted to coordination-only tools | ✅ | `/team delegate [on|off]`; `tool_call` blocks `bash/edit/write`; widget shows `[delegate]`. | P1 |
 | Plan approval | Comrade can be "plan required" and needs lead approval to implement | ✅ | `/team spawn <name> plan` → read-only tools; sends `plan_approval_request`; `/team plan approve|reject`. | P1 |
@@ -94,9 +94,10 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 7) **Cleanup** ✅
    - `/team cleanup [--force]` deletes only `<teamsRoot>/<teamId>` after safety checks.
 
-8) **Peer-to-peer messaging** ✅
+8) **Peer-to-peer and worker-to-lead messaging** ✅
    - Worker tool `team_message` with `urgent` flag for mid-turn interrupts
-   - Mailbox transport; leader CC notifications
+   - Worker tool `message_lead` for direct questions/status/blockers to the leader
+   - Mailbox transport; leader CC notifications for peer DMs
    - Urgent messages delivered via `sendUserMessage({ deliverAs: "steer" })` to interrupt active turns
 
 9) **Shared task list across sessions** ✅

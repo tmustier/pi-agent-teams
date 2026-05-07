@@ -30,7 +30,7 @@ import { handleTeamTaskCommand } from "./leader-task-commands.js";
 import type { SpawnTeammateFn } from "./spawn-types.js";
 import type { TeamConfig } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
-import type { TeammateRpc } from "./teammate-rpc.js";
+import type { TeammateHandle } from "./teammate-rpc.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import type { TeamsStyle } from "./teams-style.js";
 
@@ -82,7 +82,7 @@ export function getTeamHelpText(): string {
 export async function handleTeamCommand(opts: {
 	args: string;
 	ctx: ExtensionCommandContext;
-	teammates: Map<string, TeammateRpc>;
+	teammates: Map<string, TeammateHandle>;
 	getTeamConfig: () => TeamConfig | null;
 	getTracker: () => ActivityTracker;
 	getTasks: () => TeamTask[];
@@ -243,7 +243,7 @@ export async function handleTeamCommand(opts: {
 		},
 
 		gc: async () => {
-			await handleTeamGcCommand({ ctx, rest });
+			await handleTeamGcCommand({ ctx, rest, teamId: activeTeamId });
 		},
 
 		prune: async () => {

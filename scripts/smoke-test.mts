@@ -10,6 +10,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 // We import from .ts source (tsx handles it)
 import { withLock } from "../extensions/teams/fs-lock.js";
@@ -32,7 +34,7 @@ import {
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus, updateTeamHooksPolicy } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
 import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelSelection } from "../extensions/teams/model-policy.js";
-import { getMemberModel, getMemberThinking, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
+import { formatAggregatedUsageBreakdown, formatUsageBreakdown, getMemberModel, getMemberThinking, getTaskProgressSummary, getVisibleWorkerNames, shortModelLabel } from "../extensions/teams/teams-ui-shared.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	HOOK_CONTRACT_VERSION,
@@ -45,7 +47,7 @@ import {
 	shouldCreateHookFollowupTask,
 	shouldReopenTaskOnHookFailure,
 } from "../extensions/teams/hooks.js";
-import { TranscriptTracker, type TranscriptEntry } from "../extensions/teams/activity-tracker.js";
+import { ActivityTracker, TranscriptTracker, type TranscriptEntry } from "../extensions/teams/activity-tracker.js";
 import { listDiscoveredTeams } from "../extensions/teams/team-discovery.js";
 import {
 	acquireTeamAttachClaim,
@@ -68,11 +70,20 @@ import {
 	isAbortRequestMessage,
 	isPlanApprovedMessage,
 	isPlanRejectedMessage,
+	taskAssignmentPayload,
 } from "../extensions/teams/protocol.js";
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
+import { planDelegateTeammateNames, registerTeamsTool } from "../extensions/teams/leader-teams-tool.js";
+import { sendPromptOrFollowUp } from "../extensions/teams/leader-messaging-commands.js";
+import { runWorker } from "../extensions/teams/worker.js";
+import { buildWorkerToolAllowlist, WORKER_READ_ONLY_PLAN_TOOLS, withWorkerCommunicationTools } from "../extensions/teams/worker-tools.js";
+import { TeammateRpc, type TeammateHandle } from "../extensions/teams/teammate-rpc.js";
+import { TeammateTmux } from "../extensions/teams/teammate-tmux.js";
+import { spawnWorkerPane, type TmuxContext, type TmuxExecutor } from "../extensions/teams/tmux-layout.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";
-import { SessionManager, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getTeamDir, validateTeamId } from "../extensions/teams/paths.js";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -115,6 +126,32 @@ assertEq(sanitizeName("Hello World!"), "Hello-World-", "non-alnum → hyphens");
 assertEq(sanitizeName("agent_1"), "agent_1", "underscores kept");
 assertEq(sanitizeName(""), "", "empty stays empty");
 assertEq(sanitizeName("UPPER"), "UPPER", "case preserved");
+
+// ── 1a. team path validation ────────────────────────────────────────
+console.log("\n1a. team path validation");
+{
+	const oldRoot = process.env.PI_TEAMS_ROOT_DIR;
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teams-root-smoke-"));
+	process.env.PI_TEAMS_ROOT_DIR = root;
+	try {
+		assertEq(validateTeamId("safe-team_123"), null, "validateTeamId accepts safe team ids");
+		assert(validateTeamId("../escape")?.includes("traversal") ?? false, "validateTeamId rejects traversal segments");
+		assert(validateTeamId("nested/team")?.includes("path separators") ?? false, "validateTeamId rejects slash separators");
+		assert(validateTeamId(" nested ")?.includes("whitespace") ?? false, "validateTeamId rejects leading/trailing whitespace");
+		assert(validateTeamId(path.resolve(root, "abs"))?.includes("path separators") ?? false, "validateTeamId rejects absolute paths");
+		let threw = false;
+		try {
+			getTeamDir("../escape");
+		} catch (err: unknown) {
+			threw = err instanceof Error && err.message.includes("Invalid teamId");
+		}
+		assert(threw, "getTeamDir refuses traversal teamId");
+		assertEq(getTeamDir("safe-team_123"), path.join(root, "safe-team_123"), "getTeamDir keeps safe ids under teams root");
+	} finally {
+		if (oldRoot === undefined) delete process.env.PI_TEAMS_ROOT_DIR;
+		else process.env.PI_TEAMS_ROOT_DIR = oldRoot;
+	}
+}
 
 // ── 1b. model policy ────────────────────────────────────────────────
 console.log("\n1b. model-policy");
@@ -200,6 +237,30 @@ console.log("\n1c. teams-ui-shared helpers");
 		"high",
 		"getMemberThinking extracts thinking from meta",
 	);
+
+	assertEq(
+		formatAggregatedUsageBreakdown({ input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, cost: 0 }, 250),
+		"↑1.0k ↓500 + 250 total",
+		"formatAggregatedUsageBreakdown preserves fallback-only totals with component totals",
+	);
+	assertEq(
+		getTaskProgressSummary([
+			{ id: "1", subject: "done", description: "", status: "completed", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" },
+			{ id: "2", subject: "active", description: "", status: "in_progress", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" },
+			{ id: "3", subject: "todo", description: "", status: "pending", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" },
+		]).percent,
+		33,
+		"getTaskProgressSummary percent includes in-progress tasks in denominator",
+	);
+	assertEq(
+		getVisibleWorkerNames({
+			teammates: new Map(),
+			teamConfig: { version: 1, teamId: "t", taskListId: "t", leadName: "lead", createdAt: "", updatedAt: "", members: [] },
+			tasks: [{ id: "4", subject: "owned", description: "", status: "in_progress", owner: "offline-worker", blocks: [], blockedBy: [], createdAt: "", updatedAt: "" }],
+		}),
+		["offline-worker"],
+		"getVisibleWorkerNames includes in-progress owners that are not online/RPC",
+	);
 }
 
 // ── 2. fs-lock ───────────────────────────────────────────────────────
@@ -224,6 +285,20 @@ console.log("\n2. fs-lock.withLock");
 }
 
 {
+	// Invalid/foreign lock recovery is opt-in and protects mailboxes from manual lock-file edits.
+	const lockFile = path.join(tmpRoot, "foreign.lock");
+	fs.writeFileSync(lockFile, "created by a foreign flock script");
+	const result = await withLock(lockFile, async () => "recovered", {
+		recoverAbandoned: true,
+		invalidLockGraceMs: 20,
+		timeoutMs: 1_000,
+		pollMs: 5,
+	});
+	assertEq(result, "recovered", "withLock recovers invalid foreign locks when enabled");
+	assert(!fs.existsSync(lockFile), "foreign lock cleaned up after recovery");
+}
+
+{
 	// Contention: many concurrent callers should serialize without throwing.
 	const lockFile = path.join(tmpRoot, "contended.lock");
 	const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -244,6 +319,47 @@ console.log("\n2. fs-lock.withLock");
 	await Promise.all(runners);
 	assertEq(counter, 20, "withLock serializes contended callers");
 	assert(!fs.existsSync(lockFile), "contended lock cleaned up after");
+}
+
+{
+	// A live holder must not be stolen just because staleMs has elapsed; otherwise two writers can enter.
+	const lockFile = path.join(tmpRoot, "live-holder.lock");
+	const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+	let holderEntered = false;
+	let activeHolders = 0;
+	let overlapDetected = false;
+
+	const holder = withLock(
+		lockFile,
+		async () => {
+			holderEntered = true;
+			activeHolders += 1;
+			await sleep(450);
+			activeHolders -= 1;
+		},
+		{ staleMs: 120, pollMs: 10, timeoutMs: 2_000, label: "live-holder" },
+	);
+	while (!holderEntered) await sleep(5);
+	await sleep(180);
+
+	let timedOut = false;
+	try {
+		await withLock(
+			lockFile,
+			async () => {
+				overlapDetected = activeHolders > 0;
+				return "stolen";
+			},
+			{ staleMs: 120, pollMs: 10, timeoutMs: 90, label: "contender" },
+		);
+	} catch (err: unknown) {
+		timedOut = err instanceof Error && err.message.includes("Timeout acquiring lock");
+	}
+	assert(timedOut, "withLock does not steal a stale-aged lock from a live holder");
+	assert(!overlapDetected, "withLock never overlaps live holder critical sections");
+	await holder;
+	const recovered = await withLock(lockFile, async () => "after-live", { staleMs: 120, pollMs: 10, timeoutMs: 500 });
+	assertEq(recovered, "after-live", "withLock can acquire after live holder releases");
 }
 
 // ── 3. mailbox ───────────────────────────────────────────────────────
@@ -315,6 +431,20 @@ console.log("\n3. mailbox");
 	const msgs5 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
 	assertEq(msgs5.length, 1, "pop returns 1 normal message");
 	assertEq(msgs5.at(0)?.urgent, undefined, "non-urgent message has no urgent flag");
+
+	// Foreign/invalid mailbox lock files should recover quickly instead of poisoning writes for 60s.
+	const leadInboxPath = getInboxPath(teamDir, TEAM_MAILBOX_NS, "team-lead");
+	fs.mkdirSync(path.dirname(leadInboxPath), { recursive: true });
+	fs.writeFileSync(`${leadInboxPath}.lock`, "left by manual Python fcntl script");
+	const lockRecoveryStartedAt = Date.now();
+	await writeToMailbox(teamDir, TEAM_MAILBOX_NS, "team-lead", {
+		from: "agent1",
+		text: "recovered after foreign lock",
+		timestamp: "2025-01-01T00:05:00Z",
+	});
+	assert(Date.now() - lockRecoveryStartedAt < 5_000, "mailbox write recovers invalid foreign lock before writer timeout");
+	const recoveredMsgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "team-lead");
+	assertEq(recoveredMsgs.at(0)?.text, "recovered after foreign lock", "message delivered after foreign lock recovery");
 }
 
 // ── 4. task-store ────────────────────────────────────────────────────
@@ -356,9 +486,15 @@ console.log("\n4. task-store");
 	assertEq(t2after?.owner, "agent2", "startAssignedTask preserves owner");
 
 	// completeTask
-	await completeTask(teamDir, taskListId, t1.id, "agent1", "All tests passing");
+	const t1Complete = await completeTask(teamDir, taskListId, t1.id, "agent1", "All tests passing");
+	assert(t1Complete.ok, "completeTask reports success for owner");
 	const t1done = await getTask(teamDir, taskListId, t1.id);
 	assertEq(t1done?.status, "completed", "completeTask sets completed");
+	assertEq(t1done?.metadata?.["result"], "All tests passing", "completeTask stores owner result");
+	const t1Duplicate = await completeTask(teamDir, taskListId, t1.id, "agent1", "duplicate must not overwrite");
+	assert(!t1Duplicate.ok && t1Duplicate.reason === "already_completed", "completeTask rejects duplicate completion as already_completed");
+	const t1AfterDuplicate = await getTask(teamDir, taskListId, t1.id);
+	assertEq(t1AfterDuplicate?.metadata?.["result"], "All tests passing", "duplicate completion does not overwrite result");
 
 	// formatTaskLine
 	assert(t1done !== null, "completed task can be re-fetched");
@@ -377,6 +513,54 @@ console.log("\n4. task-store");
 	assert(claimed !== null, "claimNextAvailableTask finds a task");
 	assertEq(claimed?.owner, "agent3", "claimed task now owned by agent3");
 
+	// completion after reassignment/unassign must not accept stale workers or stale results.
+	const reassigned = await createTask(teamDir, taskListId, {
+		subject: "Reassigned task",
+		description: "old owner must not complete after reassignment",
+		owner: "old-owner",
+	});
+	await startAssignedTask(teamDir, taskListId, reassigned.id, "old-owner");
+	await updateTask(teamDir, taskListId, reassigned.id, (cur) => ({
+		...cur,
+		owner: "new-owner",
+		status: "in_progress",
+		metadata: { ...(cur.metadata ?? {}), reassignedForSmoke: true },
+	}));
+	const staleComplete = await completeTask(teamDir, taskListId, reassigned.id, "old-owner", "old result must not be stored");
+	assert(!staleComplete.ok && staleComplete.reason === "not_owner", "completeTask rejects stale owner after reassignment");
+	assertEq((await getTask(teamDir, taskListId, reassigned.id))?.metadata?.["result"], undefined, "stale owner result is not persisted");
+	const newOwnerComplete = await completeTask(teamDir, taskListId, reassigned.id, "new-owner", "new owner result");
+	assert(newOwnerComplete.ok, "completeTask accepts current owner after reassignment");
+	assertEq((await getTask(teamDir, taskListId, reassigned.id))?.metadata?.["result"], "new owner result", "current owner result is persisted");
+
+	const unassignedCompletion = await createTask(teamDir, taskListId, {
+		subject: "Unassigned before completion",
+		description: "old owner must not complete after unassign",
+		owner: "temp-owner",
+	});
+	await startAssignedTask(teamDir, taskListId, unassignedCompletion.id, "temp-owner");
+	const unassignedCount = await unassignTasksForAgent(teamDir, taskListId, "temp-owner", "agent left");
+	assertEq(unassignedCount, 1, "unassignTasksForAgent reports one changed active task");
+	const staleAfterUnassign = await completeTask(teamDir, taskListId, unassignedCompletion.id, "temp-owner", "unassigned result must not be stored");
+	assert(!staleAfterUnassign.ok && staleAfterUnassign.reason === "not_owner", "completeTask rejects owner after unassign");
+	const unassignedFetched = await getTask(teamDir, taskListId, unassignedCompletion.id);
+	assertEq(unassignedFetched?.status, "pending", "unassignTasksForAgent resets active task to pending");
+	assertEq(unassignedFetched?.owner, undefined, "unassignTasksForAgent clears active task owner");
+	assertEq(unassignedFetched?.metadata?.["result"], undefined, "unassigned stale completion result is not stored");
+
+	const completedStillOwned = await createTask(teamDir, taskListId, {
+		subject: "Completed task stays completed",
+		description: "unassign must not mutate completed tasks",
+		owner: "done-owner",
+	});
+	await startAssignedTask(teamDir, taskListId, completedStillOwned.id, "done-owner");
+	await completeTask(teamDir, taskListId, completedStillOwned.id, "done-owner", "done result");
+	const completedUnassignCount = await unassignTasksForAgent(teamDir, taskListId, "done-owner", "agent left after completion");
+	const completedAfterUnassign = await getTask(teamDir, taskListId, completedStillOwned.id);
+	assertEq(completedUnassignCount, 0, "unassignTasksForAgent skips completed tasks");
+	assertEq(completedAfterUnassign?.status, "completed", "unassignTasksForAgent leaves completed status intact");
+	assertEq(completedAfterUnassign?.metadata?.["result"], "done result", "unassignTasksForAgent preserves completed result");
+
 	// unassignTasksForAgent — unassigns all non-completed tasks for agent
 	// agent3 claimed a task above, unassign it
 	await unassignTasksForAgent(teamDir, taskListId, "agent3", "agent3 left");
@@ -386,6 +570,16 @@ console.log("\n4. task-store");
 	// dependencies
 	const depRes = await addTaskDependency(teamDir, taskListId, t3.id, t2.id);
 	assert(depRes.ok, "addTaskDependency ok");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [t2.id], "addTaskDependency records blockedBy on dependent");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [t3.id], "addTaskDependency records reverse blocks on dependency");
+	const depResDuplicate = await addTaskDependency(teamDir, taskListId, t3.id, t2.id);
+	assert(depResDuplicate.ok, "addTaskDependency duplicate ok/idempotent");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [t2.id], "duplicate dependency does not duplicate blockedBy");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [t3.id], "duplicate dependency does not duplicate reverse blocks");
+	const missingDep = await addTaskDependency(teamDir, taskListId, t3.id, "missing-dep");
+	assert(!missingDep.ok, "addTaskDependency rejects missing dependency");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [t2.id], "failed dependency add leaves dependent unchanged");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [t3.id], "failed dependency add leaves dependency unchanged");
 	const t3fetched = await getTask(teamDir, taskListId, t3.id);
 	assert(t3fetched !== null, "getTask returns dependency task");
 	const blocked = t3fetched ? await isTaskBlocked(teamDir, taskListId, t3fetched) : false;
@@ -393,6 +587,13 @@ console.log("\n4. task-store");
 
 	const rmDep = await removeTaskDependency(teamDir, taskListId, t3.id, t2.id);
 	assert(rmDep.ok, "removeTaskDependency ok");
+	assertEq((await getTask(teamDir, taskListId, t3.id))?.blockedBy, [], "removeTaskDependency clears blockedBy on dependent");
+	assertEq((await getTask(teamDir, taskListId, t2.id))?.blocks, [], "removeTaskDependency clears reverse blocks on dependency");
+	const rmDepAgain = await removeTaskDependency(teamDir, taskListId, t3.id, t2.id);
+	assert(rmDepAgain.ok, "removeTaskDependency is idempotent for absent edge");
+	const t3AfterRemove = await getTask(teamDir, taskListId, t3.id);
+	const unblocked = t3AfterRemove ? await isTaskBlocked(teamDir, taskListId, t3AfterRemove) : true;
+	assert(!unblocked, "task is unblocked after dependency removal");
 
 	// clearTasks (completed only)
 	const clearResult = await clearTasks(teamDir, taskListId, "completed");
@@ -1272,6 +1473,43 @@ console.log("\n13. formatElapsed + lastMessageSummary");
 	assert(lastMessageSummary(shortRpc, 20) === "Short", "lastMessageSummary keeps short text intact");
 }
 
+// ── 13b. TeammateRpc lifecycle ───────────────────────────────────────
+console.log("\n13b. TeammateRpc lifecycle");
+{
+	class FakeChildProcess extends EventEmitter {
+		stdin = new PassThrough();
+		stdout = new PassThrough();
+		stderr = new PassThrough();
+		exitCode: number | null = null;
+		signalCode: NodeJS.Signals | null = null;
+		killed = false;
+		signals: NodeJS.Signals[] = [];
+
+		kill(signal?: NodeJS.Signals | number): boolean {
+			const sig = typeof signal === "string" ? signal : "SIGTERM";
+			this.killed = true;
+			this.signals.push(sig);
+			return true;
+		}
+	}
+
+	const fakeProc = new FakeChildProcess();
+	const rpc = new TeammateRpc("lifecycle", undefined, (() => fakeProc) as never);
+	await rpc.start({ cwd: tmpRoot, env: {}, args: [] });
+	assertEq(rpc.status, "idle", "TeammateRpc test process starts idle");
+
+	await rpc.stop();
+	assertEq(rpc.status, "stopped", "TeammateRpc.stop immediately marks intentional stop");
+	assertEq(fakeProc.signals, ["SIGTERM"], "TeammateRpc.stop sends SIGTERM first");
+
+	await new Promise((resolve) => setTimeout(resolve, 1100));
+	assertEq(fakeProc.signals, ["SIGTERM", "SIGKILL"], "TeammateRpc.stop escalates stubborn child with retained proc ref");
+
+	fakeProc.emit("close", 143);
+	assertEq(rpc.status, "stopped", "TeammateRpc intentional SIGTERM close remains stopped");
+	assertEq(rpc.lastError, null, "TeammateRpc intentional stop does not surface false error");
+}
+
 // ── 14. leader-inbox LLM message injection ───────────────────────────
 console.log("\n14. leader-inbox LLM message injection");
 {
@@ -1382,6 +1620,44 @@ console.log("\n14. leader-inbox LLM message injection");
 		assert(failMsg.content.includes("failed"), "failure LLM message includes failed");
 		assert(failMsg.content.includes("timeout after 60s"), "failure LLM message includes abortReason");
 		assert(failMsg.content.includes("health check failed"), "failure LLM message includes partialResult");
+	}
+
+	// Stale/missing failed task IDs should still wake the leader with the worker's reason.
+	const staleFailedTaskId = "9999";
+	const tsStaleFail = new Date().toISOString();
+	await writeToMailbox(inboxTeamDir, TEAM_MAILBOX_NS, leadName, {
+		from: "bob",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "bob",
+			timestamp: tsStaleFail,
+			completedTaskId: staleFailedTaskId,
+			completedStatus: "failed",
+			taskFailureReason: "Task disappeared before completion could be recorded",
+		}),
+		timestamp: tsStaleFail,
+	});
+
+	llmMessages.length = 0;
+	await pollLeaderInbox({
+		ctx: stubCtx,
+		teamId: "inbox-team",
+		teamDir: inboxTeamDir,
+		taskListId: inboxTaskListId,
+		leadName,
+		style,
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			llmMessages.push({ content, options });
+		},
+	});
+
+	assert(llmMessages.length === 1, "stale failed completion still sends one LLM notification");
+	const staleFailMsg = llmMessages[0];
+	if (staleFailMsg) {
+		assert(staleFailMsg.content.includes(`task #${staleFailedTaskId}`), "stale failure notification includes missing task id");
+		assert(staleFailMsg.content.includes("Task disappeared"), "stale failure notification includes worker failure reason");
+		assertEq(staleFailMsg.options?.deliverAs, "followUp", "stale failure notification uses followUp delivery");
 	}
 
 	// Test hook-aware allDone qualifier
@@ -1513,8 +1789,377 @@ console.log("\n14. leader-inbox LLM message injection");
 	}
 }
 
-// ── 15. docs/help drift guard ────────────────────────────────────────
-console.log("\n15. docs/help drift guard");
+// ── 15. worker/leader messaging hardening ───────────────────────────
+console.log("\n15. worker/leader messaging hardening");
+{
+	assertEq(
+		buildWorkerToolAllowlist(["read", "bash", "edit", "write", "grep", "find", "ls"]),
+		["read", "bash", "edit", "write", "grep", "find", "ls", "message_lead", "team_message"],
+		"worker spawn allowlist appends communication tools to normal built-ins",
+	);
+	assertEq(
+		buildWorkerToolAllowlist(["read", "grep", "find", "ls"]),
+		["read", "grep", "find", "ls", "message_lead", "team_message"],
+		"worker spawn allowlist keeps communication tools with read-only built-ins",
+	);
+	assertEq(
+		buildWorkerToolAllowlist(["read", "grep", "message_lead", "edit_file"]),
+		["read", "grep", "message_lead", "team_message"],
+		"worker spawn allowlist preserves built-in restrictions and avoids duplicate communication tools",
+	);
+	assertEq(
+		withWorkerCommunicationTools(["read", "message_lead"]),
+		["read", "message_lead", "team_message"],
+		"withWorkerCommunicationTools appends missing communication tools once",
+	);
+	assertEq(
+		[...WORKER_READ_ONLY_PLAN_TOOLS],
+		["read", "grep", "find", "ls", "message_lead", "team_message"],
+		"plan-required read-only tool set includes communication tools",
+	);
+
+	const planned = planDelegateTeammateNames({
+		inputTasks: [
+			{ text: "Investigate locks", assignee: "locksmith" },
+			{ text: "Trace messages", assignee: "messenger" },
+			{ text: "Audit UX", assignee: "ux-audit" },
+		],
+		style: "normal",
+		maxTeammates: 3,
+		existingTeammateNames: [],
+	});
+	assertEq(planned.join(","), "locksmith,messenger,ux-audit", "explicit task assignees plan exactly those teammates");
+	assert(!planned.some((name) => name.startsWith("agent")), "explicit task assignees do not spawn generic agent extras");
+
+	type RegisteredLeaderTool = {
+		name: string;
+		execute: (...args: unknown[]) => Promise<unknown>;
+	};
+	const leaderTools = new Map<string, RegisteredLeaderTool>();
+	const leaderFakePi = {
+		registerTool(tool: RegisteredLeaderTool) {
+			leaderTools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	const leaderTeammates = new Map<string, TeammateHandle>();
+	const spawnedNames: string[] = [];
+	const makeHandle = (name: string, status: TeammateHandle["status"] = "idle") => ({
+		name,
+		status,
+		lastAssistantText: "",
+		lastError: null,
+		currentTaskId: null,
+		lastStatusChangeAt: Date.now(),
+		lastEventAt: Date.now(),
+		onEvent: () => () => {},
+		onClose: () => () => {},
+		getStderr: () => "",
+		start: async () => {},
+		stop: async () => {},
+		prompt: async () => {},
+		steer: async () => {},
+		followUp: async () => {},
+		abort: async () => {},
+		getState: async () => ({}),
+		setSessionName: async () => {},
+	}) as TeammateHandle;
+	registerTeamsTool({
+		pi: leaderFakePi,
+		teammates: leaderTeammates,
+		spawnTeammate: async (_ctx, opts) => {
+			spawnedNames.push(opts.name);
+			leaderTeammates.set(opts.name, makeHandle(opts.name));
+			return { ok: true, name: opts.name, mode: opts.mode ?? "fresh", workspaceMode: opts.workspaceMode ?? "shared", warnings: [] };
+		},
+		getTeamId: () => "leader-tool-team",
+		getTaskListId: () => "leader-tool-team",
+		getTracker: () => new ActivityTracker(),
+		getTeamConfig: () => null,
+		refreshTasks: async () => {},
+		renderWidget: () => {},
+		hideWidget: () => {},
+		stopAllTeammates: async () => {},
+		pendingPlanApprovals: new Map(),
+	});
+	const leaderTool = leaderTools.get("teams");
+	assert(leaderTool !== undefined, "leader registers teams tool");
+	if (leaderTool) {
+		await leaderTool.execute("tc-spawn-many", { action: "member_spawn", teammates: ["alpha", "beta", "gamma"] }, undefined, undefined, {
+			cwd: tmpRoot,
+			sessionManager: { getSessionId: () => "leader-tool-team" },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assertEq(spawnedNames.join(","), "alpha,beta,gamma", "member_spawn accepts teammates array for multi-spawn");
+
+		leaderTeammates.set("alpha", makeHandle("alpha", "stopped"));
+		await leaderTool.execute("tc-restart", { action: "member_spawn", name: "alpha" }, undefined, undefined, {
+			cwd: tmpRoot,
+			sessionManager: { getSessionId: () => "leader-tool-team" },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assertEq(spawnedNames.filter((name) => name === "alpha").length, 2, "member_spawn can restart a stopped teammate with the same name");
+	}
+
+	let promptCalls = 0;
+	let followUpCalls = 0;
+	const racingTeammate = {
+		name: "alice",
+		status: "idle",
+		async prompt(_message: string) {
+			promptCalls += 1;
+			throw new Error("Agent is already processing a prompt");
+		},
+		async followUp(_message: string) {
+			followUpCalls += 1;
+		},
+	} as unknown as TeammateHandle;
+	const delivery = await sendPromptOrFollowUp(racingTeammate, "status?");
+	assertEq(delivery, "followUpRetry", "prompt race falls back to followUp");
+	assertEq(promptCalls, 1, "prompt attempted once before fallback");
+	assertEq(followUpCalls, 1, "followUp used after prompt race");
+
+	type RegisteredTool = {
+		name: string;
+		description?: string;
+		promptGuidelines?: string[];
+		execute: (...args: unknown[]) => Promise<unknown>;
+	};
+	const registeredTools = new Map<string, RegisteredTool>();
+	const fakePi = {
+		registerTool(tool: RegisteredTool) {
+			registeredTools.set(tool.name, tool);
+		},
+		on() {
+			return undefined;
+		},
+	} as unknown as ExtensionAPI;
+
+	const envKeys = [
+		"PI_TEAMS_TEAM_ID",
+		"PI_TEAMS_TASK_LIST_ID",
+		"PI_TEAMS_AGENT_NAME",
+		"PI_TEAMS_LEAD_NAME",
+		"PI_TEAMS_ROOT_DIR",
+		"PI_TEAMS_AUTO_CLAIM",
+		"PI_TEAMS_PLAN_REQUIRED",
+	] as const;
+	const savedEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedEnv.set(key, process.env[key]);
+	const workerTeamId = "worker-tool-team";
+	const workerTeamDir = path.join(tmpRoot, workerTeamId);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = workerTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = workerTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "alice";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+
+		runWorker(fakePi);
+	} finally {
+		for (const key of envKeys) {
+			const value = savedEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+
+	const messageLead = registeredTools.get("message_lead");
+	assert(messageLead !== undefined, "worker registers message_lead tool");
+	if (messageLead) {
+		assert(messageLead.description?.includes("team lead") ?? false, "message_lead description mentions team lead");
+		await messageLead.execute("tc-lead", { message: "I am blocked", urgent: true }, undefined, undefined, undefined);
+	}
+
+	const workerLlmMessages: Array<{ content: string; options?: { deliverAs?: string } }> = [];
+	const workerStubCtx = {
+		cwd: workerTeamDir,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => workerTeamId },
+		isIdle: () => false,
+	} as unknown as ExtensionContext;
+	await pollLeaderInbox({
+		ctx: workerStubCtx,
+		teamId: workerTeamId,
+		teamDir: workerTeamDir,
+		taskListId: workerTeamId,
+		leadName: "team-lead",
+		style: "normal",
+		pendingPlanApprovals: new Map(),
+		sendLeaderLlmMessage: (content, options) => {
+			workerLlmMessages.push({ content, options });
+		},
+	});
+	assertEq(workerLlmMessages.length, 1, "message_lead routes one DM to leader LLM");
+	const leadMsg = workerLlmMessages[0];
+	if (leadMsg) {
+		assertEq(leadMsg.content, "[Team DM] alice: I am blocked", "leader receives worker DM content");
+		assertEq(leadMsg.options?.deliverAs, "steer", "urgent worker-to-lead DM uses steer delivery");
+	}
+
+	const teamMessage = registeredTools.get("team_message");
+	assert(teamMessage !== undefined, "worker registers team_message tool");
+	if (teamMessage) {
+		await teamMessage.execute("tc-team", { recipient: "team-lead", message: "generic path to lead", urgent: false }, undefined, undefined, undefined);
+	}
+	const leadInboxMsgs = await popUnreadMessages(workerTeamDir, TEAM_MAILBOX_NS, "team-lead");
+	assertEq(leadInboxMsgs.length, 1, "team_message to lead writes only the direct DM, no duplicate CC");
+	assertEq(leadInboxMsgs.at(0)?.text, "generic path to lead", "team_message to lead writes the direct message text");
+
+	const planSetActiveToolsCalls: string[][] = [];
+	const planHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	const planFakePi = {
+		registerTool() {
+			return undefined;
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			planHandlers.set(event, handler);
+			return undefined;
+		},
+		getActiveTools() {
+			return ["read", "grep", "message_lead"];
+		},
+		setActiveTools(tools: string[]) {
+			planSetActiveToolsCalls.push(tools);
+		},
+	} as unknown as ExtensionAPI;
+	const planWorkerTeamId = "worker-plan-tools-team";
+	const savedPlanEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedPlanEnv.set(key, process.env[key]);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = planWorkerTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = planWorkerTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "planner";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+		process.env.PI_TEAMS_PLAN_REQUIRED = "1";
+		runWorker(planFakePi);
+		await planHandlers.get("session_start")?.({ type: "session_start" }, {
+			cwd: path.join(tmpRoot, planWorkerTeamId),
+			sessionManager: { getSessionId: () => planWorkerTeamId, getSessionFile: () => undefined },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+	} finally {
+		for (const key of envKeys) {
+			const value = savedPlanEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+	assertEq(planSetActiveToolsCalls.at(0), [...WORKER_READ_ONLY_PLAN_TOOLS], "plan-required mode keeps communication tools active");
+
+	const waitFor = async (predicate: () => boolean, timeoutMs = 2_000): Promise<boolean> => {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (predicate()) return true;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		return predicate();
+	};
+
+	const workerTurnMessages: Array<{ content: unknown; options?: { deliverAs?: string } }> = [];
+	const turnHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	const turnFakePi = {
+		registerTool() {
+			return undefined;
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			turnHandlers.set(event, handler);
+			return undefined;
+		},
+		sendUserMessage(content: unknown, options?: { deliverAs?: string }) {
+			workerTurnMessages.push({ content, options });
+		},
+	} as unknown as ExtensionAPI;
+	const turnWorkerTeamId = "worker-turn-delivery-team";
+	const turnWorkerTeamDir = path.join(tmpRoot, turnWorkerTeamId);
+	const savedTurnEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedTurnEnv.set(key, process.env[key]);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = turnWorkerTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = turnWorkerTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "dm-worker";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+		await writeToMailbox(turnWorkerTeamDir, TEAM_MAILBOX_NS, "dm-worker", {
+			from: "team-lead",
+			text: "please report status",
+			timestamp: new Date().toISOString(),
+		});
+		runWorker(turnFakePi);
+		await turnHandlers.get("session_start")?.({ type: "session_start" }, {
+			cwd: turnWorkerTeamDir,
+			sessionManager: { getSessionId: () => turnWorkerTeamId, getSessionFile: () => undefined },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assert(await waitFor(() => workerTurnMessages.length > 0), "queued worker DM triggers a worker turn");
+		assertEq(workerTurnMessages.at(0)?.options?.deliverAs, "followUp", "queued worker DM uses followUp delivery");
+		await turnHandlers.get("session_shutdown")?.({ type: "session_shutdown" });
+	} finally {
+		for (const key of envKeys) {
+			const value = savedTurnEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+
+	const taskTurnMessages: Array<{ content: unknown; options?: { deliverAs?: string } }> = [];
+	const taskTurnHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	const taskTurnFakePi = {
+		registerTool() {
+			return undefined;
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			taskTurnHandlers.set(event, handler);
+			return undefined;
+		},
+		sendUserMessage(content: unknown, options?: { deliverAs?: string }) {
+			taskTurnMessages.push({ content, options });
+		},
+	} as unknown as ExtensionAPI;
+	const taskTurnTeamId = "worker-task-delivery-team";
+	const taskTurnTeamDir = path.join(tmpRoot, taskTurnTeamId);
+	const assignedTask = await createTask(taskTurnTeamDir, taskTurnTeamId, {
+		subject: "Check task prompt delivery",
+		description: "Ensure assigned task wakeups use followUp delivery.",
+		owner: "task-worker",
+	});
+	const savedTaskTurnEnv = new Map<string, string | undefined>();
+	for (const key of envKeys) savedTaskTurnEnv.set(key, process.env[key]);
+	try {
+		process.env.PI_TEAMS_TEAM_ID = taskTurnTeamId;
+		process.env.PI_TEAMS_TASK_LIST_ID = taskTurnTeamId;
+		process.env.PI_TEAMS_AGENT_NAME = "task-worker";
+		process.env.PI_TEAMS_LEAD_NAME = "team-lead";
+		process.env.PI_TEAMS_ROOT_DIR = tmpRoot;
+		process.env.PI_TEAMS_AUTO_CLAIM = "0";
+		await writeToMailbox(taskTurnTeamDir, taskTurnTeamId, "task-worker", {
+			from: "team-lead",
+			text: JSON.stringify(taskAssignmentPayload(assignedTask, "team-lead")),
+			timestamp: new Date().toISOString(),
+		});
+		runWorker(taskTurnFakePi);
+		await taskTurnHandlers.get("session_start")?.({ type: "session_start" }, {
+			cwd: taskTurnTeamDir,
+			sessionManager: { getSessionId: () => taskTurnTeamId, getSessionFile: () => undefined },
+			ui: { notify: () => {} },
+		} as unknown as ExtensionContext);
+		assert(await waitFor(() => taskTurnMessages.length > 0), "assigned task triggers a worker turn");
+		assertEq(taskTurnMessages.at(0)?.options?.deliverAs, "followUp", "assigned task prompt uses followUp delivery");
+		await taskTurnHandlers.get("session_shutdown")?.({ type: "session_shutdown" });
+	} finally {
+		for (const key of envKeys) {
+			const value = savedTaskTurnEnv.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
+// ── 16. docs/help drift guard ────────────────────────────────────────
+console.log("\n16. docs/help drift guard");
 {
 	const help = getTeamHelpText();
 	assert(help.includes("/team done"), "help mentions /team done");
@@ -1557,6 +2202,7 @@ console.log("\n15. docs/help drift guard");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
 		assert(readme.includes("[--urgent]"), "README mentions --urgent flag");
 		assert(readme.includes("\"urgent\": true"), "README mentions urgent tool param example");
+		assert(readme.includes("message_lead"), "README documents worker-to-lead message_lead tool");
 		assert(readme.includes("/team gc"), "README mentions /team gc command");
 		assert(readme.includes("/team cleanup"), "README mentions /team cleanup command");
 		assert(readme.includes("docs/hook-contract.md"), "README references hook contract doc");
@@ -1575,6 +2221,7 @@ console.log("\n15. docs/help drift guard");
 		assert(skill.includes("team_done"), "SKILL.md mentions team_done action");
 		assert(skill.includes("/team done"), "SKILL.md mentions /team done command");
 		assert(skill.includes("urgent"), "SKILL.md mentions urgent flag");
+		assert(skill.includes("message_lead"), "SKILL.md mentions worker-to-lead message_lead tool");
 		assert(skill.includes("model_policy_get"), "SKILL.md mentions model_policy_get action");
 		assert(skill.includes("hooks_policy_get"), "SKILL.md mentions hooks_policy_get action");
 	}
@@ -1703,6 +2350,21 @@ console.log("\n15. docs/help drift guard");
 		}
 	}
 
+	// Simulate message_lead tool — should show lead + message.
+	tracker.handleEvent("alice", {
+		type: "tool_execution_start",
+		toolCallId: "tc4c",
+		toolName: "message_lead",
+		args: { message: "blocked on flaky test", urgent: true },
+	});
+	{
+		const e = lastEntry("alice");
+		assert(e.kind === "tool_start", "message_lead tool_start recorded");
+		if (e.kind === "tool_start") {
+			assert(e.summary === "→ lead: blocked on flaky test", "message_lead summary includes lead and message");
+		}
+	}
+
 	// Simulate unknown tool — fallback to first string arg
 	tracker.handleEvent("alice", {
 		type: "tool_execution_start",
@@ -1750,6 +2412,134 @@ console.log("\n15. docs/help drift guard");
 			assert(e.summary !== null && e.summary.endsWith("…"), "truncated summary ends with ellipsis");
 		}
 	}
+}
+
+// ── 12b. activity tracker usage breakdown ───────────────────────────
+{
+	console.log(`\n12b. activity tracker usage breakdown`);
+	const tracker = new ActivityTracker();
+	tracker.handleEvent("alice", {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			usage: {
+				input: 55_000,
+				output: 3_800,
+				cacheRead: 794_000,
+				cacheWrite: 0,
+				totalTokens: 852_800,
+				cost: { input: 0.2, output: 0.5, cacheRead: 0.086, cacheWrite: 0, total: 0.786 },
+			},
+		},
+	} as never);
+	const activity = tracker.get("alice");
+	assertEq(activity.totalTokens, 852_800, "activity keeps backward-compatible provider totalTokens");
+	assertEq(activity.usage.input, 55_000, "activity tracks input usage");
+	assertEq(activity.usage.output, 3_800, "activity tracks output usage");
+	assertEq(activity.usage.cacheRead, 794_000, "activity tracks cache-read usage separately");
+	assertEq(activity.usage.cost, 0.786, "activity tracks total cost");
+	assertEq(
+		formatUsageBreakdown(activity.usage, { includeCost: true, fallbackTotal: activity.totalTokens }),
+		"↑55.0k ↓3.8k R794.0k $0.786",
+		"usage breakdown display mirrors Pi footer instead of one cache-inclusive token total",
+	);
+}
+
+// ── 13. tmux worker live session activity bridge ────────────────────
+{
+	console.log(`\n13. tmux worker live session activity bridge`);
+	const sessionFile = path.join(tmpRoot, "tmux-live-status.jsonl");
+	fs.writeFileSync(sessionFile, "", "utf8");
+	const teammate = new TeammateTmux({
+		name: "tmux-smoke",
+		sessionFile,
+		teamDir: tmpRoot,
+		taskListId: "smoke-tl",
+		leadName: "lead",
+		tmuxContext: { sessionName: "s", windowId: "w", leaderPaneId: "%0" },
+		knownWorkerPaneIds: () => [],
+	});
+	const events: string[] = [];
+	teammate.onEvent((ev) => events.push(ev.type));
+
+	fs.appendFileSync(sessionFile, `${JSON.stringify({ role: "user", content: [{ type: "text", text: "do work" }], timestamp: Date.now() })}\n`);
+	await teammate.refreshSessionActivity();
+	assertEq(teammate.status, "streaming", "tmux user prompt marks teammate streaming");
+	assert(events.includes("agent_start"), "tmux user prompt emits agent_start");
+
+	fs.appendFileSync(
+		sessionFile,
+		`${JSON.stringify({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }],
+			usage: { totalTokens: 7 },
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		})}\n`,
+	);
+	await teammate.refreshSessionActivity();
+	assert(events.includes("tool_execution_start"), "tmux assistant tool call emits tool start");
+	assert(events.includes("message_end"), "tmux assistant usage emits message_end");
+
+	fs.appendFileSync(
+		sessionFile,
+		`${JSON.stringify({ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false })}\n` +
+			`${JSON.stringify({ role: "assistant", content: [{ type: "text", text: "done" }], usage: { totalTokens: 11 }, stopReason: "stop" })}\n`,
+	);
+	await teammate.refreshSessionActivity();
+	assert(events.includes("tool_execution_end"), "tmux tool result emits tool end");
+	assertEq(teammate.status, "idle", "tmux final assistant text marks teammate idle");
+	assert(teammate.lastAssistantText.includes("done"), "tmux final assistant text updates lastAssistantText");
+	assert(teammate.lastEventAt > 0, "tmux live bridge updates lastEventAt");
+}
+
+// ── 14. tmux spawn serialization ───────────────────────────────────
+{
+	console.log(`\n14. tmux spawn serialization`);
+	type SimPane = { paneId: string; width: number; height: number };
+	type CommandRecord = { command: string; args: readonly string[]; paneCount?: number; target?: string };
+	const panes: SimPane[] = [{ paneId: "%0", width: 120, height: 40 }];
+	const records: CommandRecord[] = [];
+	let nextPaneId = 1;
+	const executor: TmuxExecutor = async (args) => {
+		const command = args[0] ?? "";
+		if (command === "list-panes") {
+			records.push({ command, args: [...args], paneCount: panes.length });
+			return panes.map((pane) => `${pane.paneId}\t${pane.width}\t${pane.height}`).join("\n");
+		}
+		if (command === "split-window") {
+			const targetFlagIndex = args.indexOf("-t");
+			const target = targetFlagIndex >= 0 ? args[targetFlagIndex + 1] : undefined;
+			records.push({ command, args: [...args], target });
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			const paneId = `%${nextPaneId}`;
+			nextPaneId++;
+			panes.push({ paneId, width: 60, height: 20 });
+			return paneId;
+		}
+		records.push({ command, args: [...args] });
+		if (command === "display-message") return "120";
+		return "";
+	};
+	const ctx: TmuxContext = { sessionName: "s", windowId: "tmux-spawn-smoke-window", leaderPaneId: "%0" };
+	const env = {
+		PI_TEAMS_TMUX_SPLIT_VERIFY_DELAY_MS: "0",
+		PI_TEAMS_TMUX_SPLIT_VERIFY_TIMEOUT_MS: "0",
+		PI_TEAMS_TMUX_LEADER_WIDTH_PCT: "40",
+	};
+	const [firstPaneId, secondPaneId] = await Promise.all([
+		spawnWorkerPane({ ctx, command: "worker-1", cwd: tmpRoot, workerName: "worker-1", knownWorkerPaneIds: [], env, tmuxExecutor: executor }),
+		spawnWorkerPane({ ctx, command: "worker-2", cwd: tmpRoot, workerName: "worker-2", knownWorkerPaneIds: [], env, tmuxExecutor: executor }),
+	]);
+	const splitRecords = records.filter((record) => record.command === "split-window");
+	const firstSplitIndex = records.findIndex((record) => record.command === "split-window");
+	const secondSplitIndex = records.findIndex((record, index) => index > firstSplitIndex && record.command === "split-window");
+	const updatedListBeforeSecondSplit = records.some(
+		(record, index) => record.command === "list-panes" && index > firstSplitIndex && index < secondSplitIndex && record.paneCount === 2,
+	);
+	assertEq([firstPaneId, secondPaneId], ["%1", "%2"], "concurrent tmux spawns return both pane ids");
+	assertEq(splitRecords.map((record) => record.target), ["%0", "%1"], "serialized tmux spawns target the newly visible worker pane");
+	assert(updatedListBeforeSecondSplit, "second tmux spawn lists panes after first split is visible");
 }
 
 // ── summary ──────────────────────────────────────────────────────────
