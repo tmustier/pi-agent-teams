@@ -72,8 +72,8 @@ import {
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";
-import { SessionManager, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 // ── helpers ──────────────────────────────────────────────────────────
 let passed = 0;

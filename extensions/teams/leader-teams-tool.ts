@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import { StringEnum } from "@mariozechner/pi-ai";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type Static } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { pickAgentNames, pickNamesFromPool, sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
@@ -52,7 +51,14 @@ function describeModelSource(source: TeammateModelSource): string {
 	return "teammate-default";
 }
 
-const TeamsActionSchema = StringEnum(
+function stringEnum<const Values extends readonly [string, ...string[]]>(
+	values: Values,
+	options: Record<string, unknown> = {},
+) {
+	return Type.Unsafe<Values[number]>({ type: "string", enum: [...values], ...options });
+}
+
+const TeamsActionSchema = stringEnum(
 	[
 		"delegate",
 		"task_assign",
@@ -83,30 +89,30 @@ const TeamsActionSchema = StringEnum(
 	},
 );
 
-const TeamsTaskStatusSchema = StringEnum(["pending", "in_progress", "completed"] as const, {
+const TeamsTaskStatusSchema = stringEnum(["pending", "in_progress", "completed"] as const, {
 	description: "Task status for action=task_set_status.",
 });
 
-const TeamsContextModeSchema = StringEnum(["fresh", "branch"] as const, {
+const TeamsContextModeSchema = stringEnum(["fresh", "branch"] as const, {
 	description: "How to initialize comrade session context. 'branch' clones the leader session branch.",
 	default: "fresh",
 });
 
-const TeamsWorkspaceModeSchema = StringEnum(["shared", "worktree"] as const, {
+const TeamsWorkspaceModeSchema = stringEnum(["shared", "worktree"] as const, {
 	description: "Workspace isolation mode. 'shared' matches Claude Teams; 'worktree' creates a git worktree per comrade.",
 	default: "shared",
 });
 
-const TeamsThinkingLevelSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, {
+const TeamsThinkingLevelSchema = stringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, {
 	description:
 		"Thinking level to use for spawned comrades (defaults to the leader's current thinking level when omitted).",
 });
 
-const TeamsHookFailureActionSchema = StringEnum(["warn", "followup", "reopen", "reopen_followup"] as const, {
+const TeamsHookFailureActionSchema = stringEnum(["warn", "followup", "reopen", "reopen_followup"] as const, {
 	description: "Hook failure policy for hooks_policy_set.",
 });
 
-const TeamsHookFollowupOwnerSchema = StringEnum(["member", "lead", "none"] as const, {
+const TeamsHookFollowupOwnerSchema = stringEnum(["member", "lead", "none"] as const, {
 	description: "Follow-up owner policy for hooks_policy_set.",
 });
 

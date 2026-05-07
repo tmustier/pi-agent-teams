@@ -1,5 +1,5 @@
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import type { Theme, ThemeColor, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme, ThemeColor, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ActivityTracker, TranscriptLog, TranscriptEntry } from "./activity-tracker.js";
 import type { TeamTask } from "./task-store.js";

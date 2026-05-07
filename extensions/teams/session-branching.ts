@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { SessionEntry, SessionManager } from "@mariozechner/pi-coding-agent";
+import type { SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 
 export type BranchLeafSelection = {
 	leafId: string;

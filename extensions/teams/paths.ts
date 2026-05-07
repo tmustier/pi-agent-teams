@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /**
  * Root directory for all team artifacts (config, sessions, mailboxes, tasks).

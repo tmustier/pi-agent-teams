@@ -22,8 +22,8 @@ import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { SessionManager } from "@mariozechner/pi-coding-agent";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { writeToMailbox } from "../extensions/teams/mailbox.js";
 import { taskAssignmentPayload } from "../extensions/teams/protocol.js";
 import { branchSelectionNote, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";

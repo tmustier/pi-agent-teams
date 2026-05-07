@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.5] - 2026-05-07
+
+### Changed
+- Update Pi package imports, peer dependencies, and development dependencies to the new `@earendil-works` namespace.
+
 ## 0.5.4
 
 ### Fixes
