@@ -54,7 +54,7 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
 | Shutdown handshake | Lead requests shutdown; comrade can approve/reject | ✅ | Protocol: `shutdown_request` → `shutdown_approved` / `shutdown_rejected`. `/team shutdown <name>` (graceful), `/team kill <name>` (SIGTERM). Wording is style-controlled (e.g. "was asked to shut down", "walked the plank"). | P1 |
 | Cleanup team | "Clean up the team" removes shared resources after comrades stopped | ✅ | `/team done [--force]` ends run (stops teammates, hides widget, auto-detects completion). `/team cleanup [--force]` deletes artifacts. | P1 |
 | Hooks / quality gates | `ComradeIdle`, `TaskCompleted` hooks | 🟡 | Optional leader-side hook runner (idle/task-complete/task-fail) via `PI_TEAMS_HOOKS_ENABLED=1` + scripts under `_hooks/`; inline failure surfacing + failure-action policies (`warn`/`followup`/`reopen`/`reopen_followup`) implemented; stable hook context payload exposed via `PI_TEAMS_HOOK_CONTEXT_JSON` + auto-remediation flow (reopen cap / follow-up owner policy / teammate notification). Runtime policy changes are agent-invocable via `teams` actions (`hooks_policy_get` / `hooks_policy_set`). | P2 |
-| Widget liveliness | Status updates in near real-time | ✅ | Event-driven widget refresh on teammate tool start/end and turn completion; auto-done detection with `/team done` hint. | P2 |
+| Widget liveliness | Status updates in near real-time | ✅ | Event-driven widget refresh on teammate tool start/end and turn completion; auto-done detection with `/team done` hint. Widget shows all three task states (pending/active/done) with stable height (no dynamic sub-lines). | P2 |
 | Task list UX | Ctrl+T toggle; show all/clear tasks by asking | 🟡 | Widget + `/team task list` + `/team task show` + `/team task clear`; panel supports fast `t`/`shift+t` toggle into task-centric view (`Ctrl+T` is reserved by Pi for thinking blocks). | P0 |
 | Shared task list across sessions | `CLAUDE_CODE_TASK_LIST_ID=...` | ✅ | Worker env: `PI_TEAMS_TASK_LIST_ID` (manual workers). Leader: `/team task use <taskListId>` (persisted). Newly spawned workers inherit; existing workers need restart. | P1 |
 | Join/attach flow | Join existing team context from another running session | 🟡 | `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach` plus claim heartbeat/takeover handshake added. Widget/panel now show attached-mode banner + detach hint. | P2 |
@@ -126,12 +126,31 @@ Legend: ✅ implemented • 🟡 partial • ❌ missing
    - Implemented: agent-invocable governance actions via `teams` tool (`plan_approve|plan_reject`).
    - Implemented: agent-invocable model policy introspection/check actions via `teams` tool (`model_policy_get|model_policy_check`) to validate spawn overrides before execution.
    - Implemented: agent-invocable end-of-run via `teams` tool (`team_done`) with structured error classification (`status`/`reason`/`hint`).
+   - Implemented: in-progress task count in widget/panel (previously only showed pending + completed).
+   - Implemented: stable widget height — active task ID shown inline instead of sub-line.
+   - Implemented: correct total percentage including all task states (was: completed/[pending+completed], now: completed/total).
    - Next: optional tmux split-pane integration and deeper dependency/task editing flows in panel.
 
 12) **Join/attach flow** 🟡 (partial)
    - Implemented: `/team attach list`, `/team attach <teamId> [--claim]`, `/team detach`.
    - Implemented: explicit attach claim handshake with heartbeat + force takeover (`--claim`).
    - Implemented: attached-mode affordances in widget/panel (external team banner + `/team detach` hint).
+
+## SYM-43 research triage (UI parity follow-up)
+
+Research reference: `.research/claude-teams-ui-parity.md` + `.research/claude-teams-ui/`
+
+| Research gap | Status | Resolution |
+| --- | --- | --- |
+| Always-visible status bar readability | ✅ Done | Widget shows all three task states (pending/active/done) with stable height. Active task ID shown inline, no dynamic sub-lines. |
+| Event-driven updates for "live" feel | ✅ Done (prior) | Widget re-renders on teammate tool start/end/turn completion events. 1s refresh in panel. |
+| Manual worker visibility/discovery | ✅ Done (prior) | `getVisibleWorkerNames()` includes workers from config + RPC + active task owners. Manual tmux workers auto-registered via idle notification. |
+| End-of-run cleanup UX | ✅ Done (prior) | `/team done [--force]` stops teammates + hides widget. Auto-detects when all tasks complete (shows hint). `/team cleanup` removes artifacts. `/team gc` for stale dirs. |
+| Keyboard conflict avoidance | ✅ Done (prior) | Uses `t`/`shift+t` (not `Ctrl+T`, reserved by Pi). No `Tab` conflicts. Panel shortcuts documented in README. |
+| Total percentage bug | ✅ Fixed | Total row now includes in-progress tasks in denominator (was: completed/(pending+completed)). |
+| Widget post-cleanup issue (persists after done) | ✅ Fixed (prior) | `/team done` hides widget. Widget auto-hides when no online members and no active tasks. |
+| Compact collapsed mode (Claude-style bottom bar) | ❌ Deferred | Claude shows a single-line collapsed bar with `shift+↑ to expand`. Pi widget is always expanded. Would require Pi TUI API additions for collapsible widgets. |
+| Display mode cycling (Shift+Up/Down) | ❌ Deferred | Claude's terminal-level teammate navigation. Not achievable without deeper Pi TUI integration. |
 
 ## Where changes would land (code map)
 
