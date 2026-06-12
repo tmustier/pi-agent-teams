@@ -224,6 +224,33 @@ console.log("\n2. fs-lock.withLock");
 }
 
 {
+	// A lock with a live holder PID must not be stolen just because it is old.
+	const lockFile = path.join(tmpRoot, "live-old.lock");
+	fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, createdAt: new Date(Date.now() - 120_000).toISOString() }));
+	const old = new Date(Date.now() - 120_000);
+	fs.utimesSync(lockFile, old, old);
+
+	let entered = false;
+	let timedOut = false;
+	try {
+		await withLock(
+			lockFile,
+			async () => {
+				entered = true;
+			},
+			{ staleMs: 1, timeoutMs: 50, pollMs: 5 },
+		);
+	} catch (err: unknown) {
+		timedOut = err instanceof Error && err.message.startsWith("Timeout acquiring lock:");
+	}
+
+	assert(timedOut, "withLock times out instead of stealing a live old lock");
+	assert(!entered, "withLock does not enter critical section for a live old lock");
+	assert(fs.existsSync(lockFile), "live old lock remains for the holder to release");
+	fs.unlinkSync(lockFile);
+}
+
+{
 	// Contention: many concurrent callers should serialize without throwing.
 	const lockFile = path.join(tmpRoot, "contended.lock");
 	const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));

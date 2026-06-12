@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.6] - 2026-06-13
+
+### Fixes
+- **Lock contention recovery** — stale team locks now use PID-aware, atomic rename cleanup for crashed holders while refusing to steal locks from live holders whose critical sections legitimately exceed the stale threshold. Timeout diagnostics include holder PID details and manual cleanup guidance. Thanks **@awkay** — #43.
+
 ## [0.5.5] - 2026-05-07
 
 ### Changed
