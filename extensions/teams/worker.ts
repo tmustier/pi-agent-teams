@@ -1,5 +1,5 @@
-import type { AgentMessage, AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";

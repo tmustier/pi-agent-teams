@@ -72,8 +72,8 @@ import {
 import { DelegationTracker, pollLeaderInbox } from "../extensions/teams/leader-inbox.js";
 import { getParentSessionId, shouldSilenceInheritedParentAttachClaimWarning } from "../extensions/teams/session-parent.js";
 import { branchSelectionNote, ensureSessionFileMaterialized, resolveBranchLeafSelection } from "../extensions/teams/session-branching.js";
-import { SessionManager, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 // ── helpers ──────────────────────────────────────────────────────────
 let passed = 0;
@@ -221,6 +221,33 @@ console.log("\n2. fs-lock.withLock");
 	const result = await withLock(lockFile, async () => "ok", { staleMs: 1, timeoutMs: 500 });
 	assertEq(result, "ok", "withLock removes stale lock file");
 	assert(!fs.existsSync(lockFile), "stale lock cleaned up after");
+}
+
+{
+	// A lock with a live holder PID must not be stolen just because it is old.
+	const lockFile = path.join(tmpRoot, "live-old.lock");
+	fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, createdAt: new Date(Date.now() - 120_000).toISOString() }));
+	const old = new Date(Date.now() - 120_000);
+	fs.utimesSync(lockFile, old, old);
+
+	let entered = false;
+	let timedOut = false;
+	try {
+		await withLock(
+			lockFile,
+			async () => {
+				entered = true;
+			},
+			{ staleMs: 1, timeoutMs: 50, pollMs: 5 },
+		);
+	} catch (err: unknown) {
+		timedOut = err instanceof Error && err.message.startsWith("Timeout acquiring lock:");
+	}
+
+	assert(timedOut, "withLock times out instead of stealing a live old lock");
+	assert(!entered, "withLock does not enter critical section for a live old lock");
+	assert(fs.existsSync(lockFile), "live old lock remains for the holder to release");
+	fs.unlinkSync(lockFile);
 }
 
 {

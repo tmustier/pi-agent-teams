@@ -11,13 +11,17 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 /**
  * Check if a process with the given PID is alive.
  * Returns true if the process exists (even if zombie), false otherwise.
+ *
+ * EPERM means the process exists but this process cannot signal it, so treat
+ * that as alive. Only ESRCH-style failures mean the holder is definitely gone.
  */
 function isPidAlive(pid: number): boolean {
 	try {
 		// signal 0 = existence check, does not actually send a signal
 		process.kill(pid, 0);
 		return true;
-	} catch {
+	} catch (err: unknown) {
+		if (isErrnoException(err) && err.code === "EPERM") return true;
 		return false;
 	}
 }
@@ -50,9 +54,11 @@ export interface LockOptions {
 /**
  * Acquire an exclusive file lock and run `fn`.
  *
- * Staleness is determined by TWO heuristics (either triggers cleanup):
- *   1. The lock file's mtime exceeds `staleMs` (default 60s).
- *   2. The PID recorded in the lock file is no longer alive.
+ * Staleness is determined conservatively:
+ *   1. If the lock records a live PID, the lock is still live even when older
+ *      than `staleMs`. This avoids stealing from long-running critical sections.
+ *   2. If the lock records a dead PID, it is stale immediately.
+ *   3. If no valid PID is recorded, fall back to the lock file mtime.
  *
  * To avoid the thundering-herd problem where multiple processes all unlink
  * the same stale lock and then race to re-create it, we use rename-based
@@ -88,9 +94,11 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 				const st = fs.statSync(lockFilePath);
 				const age = Date.now() - st.mtimeMs;
 				const lockPid = readLockPid(lockFilePath);
-				const pidDead = lockPid !== null && lockPid !== process.pid && !isPidAlive(lockPid);
+				const holderAlive = lockPid !== null && isPidAlive(lockPid);
+				const holderDead = lockPid !== null && !holderAlive;
+				const missingPidAndOld = lockPid === null && age > staleMs;
 
-				if (age > staleMs || pidDead) {
+				if (holderDead || missingPidAndOld) {
 					// Atomically steal the lock by renaming it to a unique temp path.
 					// Only one contender will succeed at the rename; others will get ENOENT.
 					const trashPath = `${lockFilePath}.stale.${process.pid}.${Date.now()}`;

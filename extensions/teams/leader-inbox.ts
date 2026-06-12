@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { popUnreadMessages, writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import {

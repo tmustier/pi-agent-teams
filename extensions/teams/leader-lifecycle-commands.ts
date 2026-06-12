@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cleanupTeamDir, gcStaleTeamDirs } from "./cleanup.js";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";

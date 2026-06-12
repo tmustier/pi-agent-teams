@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir } from "./paths.js";
 import type { TeammateRpc } from "./teammate-rpc.js";

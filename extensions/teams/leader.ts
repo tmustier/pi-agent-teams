@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
@@ -786,78 +786,6 @@ export function runLeader(pi: ExtensionAPI): void {
 		inboxTimer.unref?.();
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
-		const prevTeamId = currentTeamId;
-		const prevCwd = currentCtx?.cwd;
-
-		if (currentCtx) {
-			await releaseActiveAttachClaim(currentCtx);
-			const strings = getTeamsStrings(style);
-			await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is dissolved — leader moved on`);
-		}
-		stopLoops();
-		delegationTracker.clear();
-
-		// Clean up worktrees from the old session before switching.
-		// Only clean up teams this session owns — never attached teams.
-		const prevSessionId = currentCtx?.sessionManager.getSessionId();
-		if (prevTeamId && prevTeamId === prevSessionId) {
-			const teamDir = getTeamDir(prevTeamId);
-			try {
-				await cleanupWorktrees({ teamDir, teamId: prevTeamId, repoCwd: prevCwd });
-			} catch {
-				// Best-effort — don't block session switch.
-			}
-		}
-
-		currentCtx = ctx;
-		currentTeamId = currentCtx.sessionManager.getSessionId();
-		inheritedParentTeamId = getParentSessionId(currentCtx.sessionManager);
-		// Keep the task list aligned with the active session. If you want a shared namespace,
-		// use `/team task use <taskListId>` after switching.
-		taskListId = currentTeamId;
-		lastAttachClaimHeartbeatMs = 0;
-		// Clear any /team done suppression — new session context.
-		widgetSuppressed = false;
-		autoDoneNotified = false;
-
-		await ensureTeamConfig(getTeamDir(currentTeamId), {
-			teamId: currentTeamId,
-			taskListId: taskListId,
-			leadName: "team-lead",
-			style,
-		});
-
-		await refreshTasks();
-		renderWidget();
-
-		// Restart background refresh/poll loops for the new session.
-		refreshTimer = setInterval(async () => {
-			if (isStopping) return;
-			if (refreshInFlight) return;
-			refreshInFlight = true;
-			try {
-				await heartbeatActiveAttachClaim(ctx);
-				await refreshTasks();
-				renderWidget();
-			} finally {
-				refreshInFlight = false;
-			}
-		}, 1000);
-		refreshTimer.unref?.();
-
-		inboxTimer = setInterval(async () => {
-			if (isStopping) return;
-			if (inboxInFlight) return;
-			inboxInFlight = true;
-			try {
-				await pollLeaderInbox();
-			} finally {
-				inboxInFlight = false;
-			}
-		}, 700);
-		inboxTimer.unref?.();
-	});
 
 	pi.on("session_shutdown", async () => {
 		if (!currentCtx) return;

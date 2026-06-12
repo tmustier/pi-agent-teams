@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { AgentEvent } from "@mariozechner/pi-agent-core";
+import type { AgentEvent } from "@earendil-works/pi-agent-core";
 
 export type TeammateStatus = "starting" | "idle" | "streaming" | "stopped" | "error";
 
