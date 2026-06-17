@@ -15,7 +15,7 @@ import * as os from "node:os";
 import { execFileSync } from "node:child_process";
 
 import { cleanupTeamDir, gcStaleTeamDirs, assertTeamDirWithinTeamsRoot } from "../extensions/teams/cleanup.js";
-import { cleanupWorktrees } from "../extensions/teams/worktree.js";
+import { cleanupWorktrees, pruneStaleWorktreeRefs } from "../extensions/teams/worktree.js";
 import { ensureTeamConfig } from "../extensions/teams/team-config.js";
 import { createTask } from "../extensions/teams/task-store.js";
 
@@ -391,6 +391,94 @@ console.log("\n10. cleanupWorktrees (no repo context)");
 	const result = await cleanupWorktrees({ teamDir, teamId: "no-repo" });
 	assertEq(result.removedWorktrees.length, 1, "removed via filesystem fallback");
 	assert(!fs.existsSync(fakePath), "fake-agent dir removed");
+}
+
+// ── Test 11: pruneStaleWorktreeRefs cleans orphaned metadata ─────
+console.log("\n11. pruneStaleWorktreeRefs");
+{
+	// Create a worktree, then delete it from disk without git worktree remove.
+	// This leaves stale .git/worktrees/ metadata.
+	const teamId = "team-prune-refs";
+	const teamDir = path.join(teamsRoot, teamId);
+	const wtDir = path.join(teamDir, "worktrees");
+	fs.mkdirSync(wtDir, { recursive: true });
+
+	const shortTeam = teamId.slice(0, 12);
+	const agentPath = path.join(wtDir, "orphan-agent");
+	const branch = `pi-teams/${shortTeam}/orphan-agent`;
+
+	git(["worktree", "add", "-b", branch, agentPath, "HEAD"], repoDir);
+
+	// Verify worktree is listed
+	const wtBefore = gitLines(["worktree", "list", "--porcelain"], repoDir);
+	assert(wtBefore.some((l) => l.includes("orphan-agent")), "orphan worktree exists before deletion");
+
+	// Delete the worktree directory WITHOUT git worktree remove (simulates crash/manual rm)
+	fs.rmSync(agentPath, { recursive: true, force: true });
+
+	// Worktree still shows in git metadata (stale entry)
+	const wtStale = gitLines(["worktree", "list", "--porcelain"], repoDir);
+	assert(wtStale.some((l) => l.includes("orphan-agent")), "orphan worktree still in git metadata after rm");
+
+	// pruneStaleWorktreeRefs should clean it up
+	const pruneResult = await pruneStaleWorktreeRefs(repoDir);
+	assert(pruneResult.pruned, "pruneStaleWorktreeRefs returned pruned=true");
+	assert(pruneResult.warning === undefined, "no warning from pruneStaleWorktreeRefs");
+
+	// Verify the stale entry is gone
+	const wtAfter = gitLines(["worktree", "list", "--porcelain"], repoDir);
+	assert(!wtAfter.some((l) => l.includes("orphan-agent")), "orphan worktree removed from git metadata after prune");
+
+	// Clean up the branch
+	try {
+		git(["branch", "-D", branch], repoDir);
+	} catch {
+		// Branch may already be gone
+	}
+}
+
+// ── Test 12: pruneStaleWorktreeRefs handles non-git dir ──────────
+console.log("\n12. pruneStaleWorktreeRefs (non-git dir)");
+{
+	const nonGitDir = path.join(tmpRoot, "not-a-repo");
+	fs.mkdirSync(nonGitDir, { recursive: true });
+
+	const result = await pruneStaleWorktreeRefs(nonGitDir);
+	assert(!result.pruned, "returns pruned=false for non-git dir");
+}
+
+// ── Test 13: gcStaleTeamDirs removes dirs with only completed tasks
+console.log("\n13. gcStaleTeamDirs (completed-only tasks are GC'd)");
+{
+	const teamId = "old-completed";
+	const teamDir = path.join(teamsRoot, teamId);
+	fs.mkdirSync(teamDir, { recursive: true });
+	await ensureTeamConfig(teamDir, { teamId, taskListId: teamId, leadName: "lead", style: "normal" });
+
+	// Create a completed task
+	const task = await createTask(teamDir, teamId, { subject: "done task", description: "finished" });
+	const taskFile = path.join(teamDir, "tasks", teamId, `${task.id}.json`);
+	const taskData = JSON.parse(fs.readFileSync(taskFile, "utf8"));
+	taskData.status = "completed";
+	fs.writeFileSync(taskFile, JSON.stringify(taskData, null, 2));
+
+	// Backdate
+	const twoDaysAgoLocal = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+	const cfg = JSON.parse(fs.readFileSync(path.join(teamDir, "config.json"), "utf8"));
+	cfg.createdAt = twoDaysAgoLocal.toISOString();
+	fs.writeFileSync(path.join(teamDir, "config.json"), JSON.stringify(cfg, null, 2));
+	fs.utimesSync(teamDir, twoDaysAgoLocal, twoDaysAgoLocal);
+
+	const result = await gcStaleTeamDirs({
+		teamsRootDir: teamsRoot,
+		maxAgeMs: 24 * 60 * 60 * 1000,
+		repoCwd: repoDir,
+		dryRun: false,
+	});
+
+	// Dirs with only completed tasks should be removed — no active work.
+	assert(result.removed.includes(teamId), "gc: old-completed removed (only completed tasks)");
+	assert(!fs.existsSync(teamDir), "gc: old-completed dir deleted");
 }
 
 // ── cleanup ──────────────────────────────────────────────────────
