@@ -63,6 +63,7 @@ interface Row {
 	displayName: string;
 	statusKey: DisplayStatus;
 	pending: number;
+	inProgress: number;
 	completed: number;
 	tokensStr: string;
 	activityText: string;
@@ -328,6 +329,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							displayName: strings.leaderControlTitle,
 							statusKey: "idle",
 							pending: leadTasks.filter((t) => t.status === "pending").length,
+							inProgress: leadTasks.filter((t) => t.status === "in_progress").length,
 							completed: leadTasks.filter((t) => t.status === "completed").length,
 							tokensStr: "\u2014",
 							activityText: "",
@@ -360,6 +362,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 							displayName: formatMemberDisplayName(style, name),
 							statusKey,
 							pending: owned.filter((t) => t.status === "pending").length,
+							inProgress: owned.filter((t) => t.status === "in_progress").length,
 							completed: owned.filter((t) => t.status === "completed").length,
 							tokensStr: formatTokens(activity.totalTokens),
 							activityText: toolActivity(activity.currentToolName),
@@ -415,6 +418,7 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 					} else {
 						// Column widths
 						const totalPending = tasks.filter((t) => t.status === "pending").length;
+						const totalInProgress = tasks.filter((t) => t.status === "in_progress").length;
 						const totalCompleted = tasks.filter((t) => t.status === "completed").length;
 						let totalTokensRaw = 0;
 						for (const name of memberNames) totalTokensRaw += tracker.get(name).totalTokens;
@@ -424,6 +428,10 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						const pW = Math.max(
 							...rows.map((r) => String(r.pending).length),
 							String(totalPending).length,
+						);
+						const iW = Math.max(
+							...rows.map((r) => String(r.inProgress).length),
+							String(totalInProgress).length,
 						);
 						const cW = Math.max(
 							...rows.map((r) => String(r.completed).length),
@@ -444,11 +452,12 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 								: theme.bold(r.displayName);
 							const statusLabel = theme.fg(DISPLAY_STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
 							const pNum = String(r.pending).padStart(pW);
+							const iNum = String(r.inProgress).padStart(iW);
 							const cNum = String(r.completed).padStart(cW);
 							const tokStr = r.tokensStr.padStart(tokW);
 							const cols = theme.fg(
 								"dim",
-								` \u00b7 ${pNum} pending \u00b7 ${cNum} complete \u00b7 ${tokStr} tokens`,
+								` \u00b7 ${pNum} pending \u00b7 ${iNum} active \u00b7 ${cNum} done \u00b7 ${tokStr} tokens`,
 							);
 							const elapsedLabel = r.elapsedStr ? " " + theme.fg("dim", r.elapsedStr) : "";
 							const actLabel = r.activityText
@@ -474,16 +483,17 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						lines.push(truncateToWidth(sepLine, width));
 
 						const totalLabel = theme.bold("Total");
-						const totalTaskCount = totalPending + totalCompleted;
+						const totalTaskCount = totalPending + totalInProgress + totalCompleted;
 						const pct =
 							totalTaskCount > 0 ? Math.round((totalCompleted / totalTaskCount) * 100) : 0;
 						const pctLabel = theme.fg("success", padRight(`${pct}%`, 9));
 						const tpNum = String(totalPending).padStart(pW);
+						const tiNum = String(totalInProgress).padStart(iW);
 						const tcNum = String(totalCompleted).padStart(cW);
 						const ttokStr = totalTokensStr.padStart(tokW);
 						const totalSuffix = theme.fg(
 							"muted",
-							` \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${ttokStr} tokens`,
+							` \u00b7 ${tpNum} pending \u00b7 ${tiNum} active \u00b7 ${tcNum} done \u00b7 ${ttokStr} tokens`,
 						);
 						const totalRow = ` ${padRight(totalLabel, nameColWidth + 3)} ${pctLabel}${totalSuffix}`;
 						lines.push(truncateToWidth(totalRow, width));

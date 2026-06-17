@@ -243,7 +243,9 @@ tool actions, but are continuously visible — no extra tool calls needed.
 
 The widget and panel show real-time worker state at a glance:
 
+- **Task progress**: per-worker counts of pending, active (in-progress), and done tasks; total row with completion percentage
 - **Time in state**: how long a worker has been in its current status (e.g. `3m12s`)
+- **Active task ID**: shown inline next to status in the persistent widget (e.g. `streaming #3 2m15s`)
 - **Stall detection**: when a streaming worker hasn't emitted any agent event for > 5 minutes, status changes to `⚠ stalled` (configurable via `PI_TEAMS_STALL_THRESHOLD_MS`)
 - **Last message summary**: most recent assistant text (first 80–100 chars) visible in the panel's selected-worker detail section
 - **Model per worker**: shown in the panel detail view when available
