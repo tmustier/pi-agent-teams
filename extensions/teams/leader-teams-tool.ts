@@ -595,8 +595,10 @@ export function registerTeamsTool(opts: {
 						const currentTool = toolActivity(activity.currentToolName);
 						const msgPreview = lastMessageSummary(rpc, 80);
 						const model = memberCfg?.meta?.["model"];
+						const thinkingLevel = memberCfg?.meta?.["thinkingLevel"];
 
-						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${currentTool ? ` (${currentTool})` : ""} · ${formatTokens(activity.totalTokens)} tokens`);
+						const modelBadge = typeof model === "string" && model ? ` · ${model}` : "";
+						lines.push(`${formatMemberDisplayName(style, n)}: ${displayStatus} ${elapsed}${modelBadge}${currentTool ? ` (${currentTool})` : ""} · ${formatTokens(activity.totalTokens)} tokens`);
 						if (msgPreview) lines.push(`  last: ${msgPreview}`);
 
 						workers.push({
@@ -610,6 +612,7 @@ export function registerTeamsTool(opts: {
 							turnCount: activity.turnCount,
 							totalTokens: activity.totalTokens,
 							model: typeof model === "string" ? model : undefined,
+							thinking: typeof thinkingLevel === "string" ? thinkingLevel : undefined,
 						});
 					}
 
@@ -640,6 +643,7 @@ export function registerTeamsTool(opts: {
 				const owned = allTasks.filter((t) => t.owner === name);
 				const activeTask = owned.find((t) => t.status === "in_progress");
 				const model = memberCfg?.meta?.["model"];
+				const thinkingLevel = memberCfg?.meta?.["thinkingLevel"];
 				const cwd = memberCfg?.cwd;
 
 				const lines: string[] = [
@@ -650,6 +654,7 @@ export function registerTeamsTool(opts: {
 					`tool calls: ${activity.toolUseCount} · turns: ${activity.turnCount} · tokens: ${formatTokens(activity.totalTokens)}`,
 				];
 				if (typeof model === "string" && model) lines.push(`model: ${model}`);
+				if (typeof thinkingLevel === "string" && thinkingLevel) lines.push(`thinking: ${thinkingLevel}`);
 				if (cwd) lines.push(`cwd: ${cwd}`);
 				if (activeTask) lines.push(`active task: #${activeTask.id} ${activeTask.subject}`);
 				lines.push(`tasks: ${owned.filter((t) => t.status === "pending").length} pending · ${owned.filter((t) => t.status === "in_progress").length} in-progress · ${owned.filter((t) => t.status === "completed").length} completed`);
@@ -673,6 +678,7 @@ export function registerTeamsTool(opts: {
 						turnCount: activity.turnCount,
 						totalTokens: activity.totalTokens,
 						model: typeof model === "string" ? model : undefined,
+						thinking: typeof thinkingLevel === "string" ? thinkingLevel : undefined,
 						activeTaskId: activeTask?.id,
 						tasks: {
 							pending: owned.filter((t) => t.status === "pending").length,
