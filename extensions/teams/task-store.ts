@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { writeJsonAtomic } from "./atomic-write.js";
 import { withLock } from "./fs-lock.js";
 import { sanitizeName } from "./names.js";
 
@@ -50,13 +51,6 @@ async function readJson(file: string): Promise<unknown | null> {
 	} catch {
 		return null;
 	}
-}
-
-async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
-	await ensureDir(path.dirname(file));
-	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-	await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
-	await fs.promises.rename(tmp, file);
 }
 
 function isStatus(s: unknown): s is TaskStatus {
