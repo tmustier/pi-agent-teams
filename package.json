@@ -30,6 +30,7 @@
     "lint": "eslint 'extensions/**/*.ts' 'scripts/**/*.ts' 'scripts/**/*.mts'",
     "typecheck": "tsc -p tsconfig.strict.json",
     "check": "npm run typecheck && npm run lint",
+    "atomic-write-test": "tsx scripts/atomic-write-test.mts",
     "smoke-test": "tsx scripts/smoke-test.mts",
     "integration-claim-test": "tsx scripts/integration-claim-test.mts",
     "integration-spawn-overrides-test": "tsx scripts/integration-spawn-overrides-test.mts",
