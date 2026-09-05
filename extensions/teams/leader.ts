@@ -15,7 +15,7 @@ import { cleanupTeamDir, gcStaleTeamDirs } from "./cleanup.js";
 import { ensureWorktreeCwd, cleanupWorktrees } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
 import { openInteractiveWidget } from "./teams-panel.js";
-import { isTeamDone } from "./teams-ui-shared.js";
+import { clearExternalActivity, isTeamDone, setExternalActivity, type ExternalActivity } from "./teams-ui-shared.js";
 import { createTeamsWidget } from "./teams-widget.js";
 import { resolveTeammateModelSelection, formatProviderModel } from "./model-policy.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
@@ -512,6 +512,60 @@ export function runLeader(pi: ExtensionAPI): void {
 		widgetSuppressed = false;
 		renderWidget();
 	};
+
+	/**
+	 * Adopt activity from sources the leader has no RPC handle for.
+	 *
+	 * Pane workers (pi-team-panes) are independent pi processes: they self-register
+	 * into the roster, so `teammates` has no TeammateRpc for them, no agent events
+	 * ever reach the tracker, and the widget renders them as idle with zero
+	 * counters however busy they are. Such a source reads its workers' own
+	 * transcripts and publishes on this channel; we fold the numbers into the same
+	 * tracker the RPC path feeds, so widget, panel and member_status agree.
+	 */
+	pi.events.on("teams:activity", (data: unknown) => {
+		if (typeof data !== "object" || data === null) return;
+		const payload = data as {
+			name?: unknown;
+			status?: unknown;
+			lastEventAt?: unknown;
+			toolUseCount?: unknown;
+			turnCount?: unknown;
+			totalTokens?: unknown;
+			currentToolName?: unknown;
+			lastToolName?: unknown;
+		};
+		const name = typeof payload.name === "string" ? sanitizeName(payload.name) : "";
+		if (!name) return;
+		// An external report must never contradict a live RPC handle.
+		if (teammates.has(name)) return;
+
+		const status = payload.status;
+		if (status !== "starting" && status !== "idle" && status !== "streaming" && status !== "stopped" && status !== "error") {
+			return;
+		}
+
+		if (status === "stopped") {
+			clearExternalActivity(name);
+			tracker.reset(name);
+			renderWidget();
+			return;
+		}
+
+		const external: ExternalActivity = {
+			status,
+			lastEventAt: typeof payload.lastEventAt === "number" ? payload.lastEventAt : Date.now(),
+		};
+		setExternalActivity(name, external);
+		tracker.applyExternal(name, {
+			toolUseCount: typeof payload.toolUseCount === "number" ? payload.toolUseCount : undefined,
+			turnCount: typeof payload.turnCount === "number" ? payload.turnCount : undefined,
+			totalTokens: typeof payload.totalTokens === "number" ? payload.totalTokens : undefined,
+			currentToolName: typeof payload.currentToolName === "string" ? payload.currentToolName : null,
+			lastToolName: typeof payload.lastToolName === "string" ? payload.lastToolName : null,
+		});
+		renderWidget();
+	});
 
 	const spawnTeammate: SpawnTeammateFn = async (ctx, opts): Promise<SpawnTeammateResult> => {
 		const warnings: string[] = [];

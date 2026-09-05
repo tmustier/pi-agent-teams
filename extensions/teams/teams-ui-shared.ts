@@ -86,15 +86,72 @@ function getStallThresholdMs(): number {
 }
 
 /**
+ * Activity reported by a source the leader has no RPC handle for.
+ *
+ * Pane workers (pi-team-panes) are independent pi processes that self-register
+ * into the roster, so `teammates` never holds a TeammateRpc for them and every
+ * status here would otherwise fall through to a hardcoded "idle" with zeroed
+ * counters. Such a source publishes on the `teams:activity` event channel and
+ * the leader parks it here, so status resolution, the widget, the interactive
+ * panel and `member_status` all read the same truth without any of them
+ * learning where it came from.
+ */
+export interface ExternalActivity {
+	status: TeammateStatus;
+	lastEventAt: number;
+}
+
+const externalActivity = new Map<string, ExternalActivity>();
+
+export function setExternalActivity(name: string, activity: ExternalActivity): void {
+	externalActivity.set(name, activity);
+}
+
+export function getExternalActivity(name: string): ExternalActivity | undefined {
+	return externalActivity.get(name);
+}
+
+export function clearExternalActivity(name: string): void {
+	externalActivity.delete(name);
+}
+
+/**
+ * Age of the last activity for a teammate, in ms, or null when unknown.
+ *
+ * Reads the RPC handle first, then an external report. Without this, a pane
+ * worker shows "last event: (unknown)" in member_status and the panel, which is
+ * exactly the field an operator checks to decide whether a quiet worker is
+ * thinking or wedged.
+ */
+export function resolveLastEventAge(
+	rpc: TeammateRpc | undefined,
+	cfg: TeamMember | undefined,
+): number | null {
+	if (rpc) return Date.now() - rpc.lastEventAt;
+	const external = cfg ? externalActivity.get(cfg.name) : undefined;
+	if (!external || external.lastEventAt <= 0) return null;
+	return Date.now() - external.lastEventAt;
+}
+
+/**
  * Resolve the display status for a teammate, including stall detection.
  *
  * A teammate is "stalled" when:
- * - It has an active RPC connection
+ * - It has an active RPC connection, or an external source reporting for it
  * - Its transport status is "streaming" (i.e. not idle/stopped/error)
  * - No agent event has been received for > stallThresholdMs
  */
 export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): DisplayStatus {
-	if (!rpc) return cfg?.status === "online" ? "idle" : "stopped";
+	if (!rpc) {
+		const external = cfg ? externalActivity.get(cfg.name) : undefined;
+		if (external && cfg?.status === "online") {
+			if (external.status === "streaming" && Date.now() - external.lastEventAt > getStallThresholdMs()) {
+				return "stalled";
+			}
+			return external.status;
+		}
+		return cfg?.status === "online" ? "idle" : "stopped";
+	}
 
 	if (rpc.status === "streaming") {
 		const elapsed = Date.now() - rpc.lastEventAt;
@@ -105,7 +162,12 @@ export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMemb
 
 export function resolveStatus(rpc: TeammateRpc | undefined, cfg: TeamMember | undefined): TeammateStatus {
 	if (rpc) return rpc.status;
-	return cfg?.status === "online" ? "idle" : "stopped";
+	if (cfg?.status === "online") {
+		const external = externalActivity.get(cfg.name);
+		if (external) return external.status;
+		return "idle";
+	}
+	return "stopped";
 }
 
 /**
