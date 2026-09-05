@@ -379,6 +379,23 @@ export class ActivityTracker {
 		return this.data.get(name) ?? emptyActivity();
 	}
 
+	/**
+	 * Adopt counters reported by a source the leader has no RPC handle for.
+	 *
+	 * Pane workers publish these on the `teams:activity` channel; without this
+	 * the widget renders zeros for them forever, because nothing ever calls
+	 * handleEvent on their behalf. Fields are assigned individually so a partial
+	 * report cannot blank out what a later, richer one already established.
+	 */
+	applyExternal(name: string, activity: Partial<TeammateActivity>): void {
+		const a = this.getOrCreate(name);
+		if (typeof activity.toolUseCount === "number") a.toolUseCount = activity.toolUseCount;
+		if (typeof activity.turnCount === "number") a.turnCount = activity.turnCount;
+		if (typeof activity.totalTokens === "number") a.totalTokens = activity.totalTokens;
+		if (activity.currentToolName !== undefined) a.currentToolName = activity.currentToolName;
+		if (activity.lastToolName !== undefined) a.lastToolName = activity.lastToolName;
+	}
+
 	reset(name: string): void {
 		this.data.delete(name);
 	}
