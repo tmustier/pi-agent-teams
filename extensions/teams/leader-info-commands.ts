@@ -5,7 +5,14 @@ import type { TeammateRpc } from "./teammate-rpc.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
-import { resolveDisplayStatus, formatElapsed, formatTokens, lastMessageSummary, toolActivity } from "./teams-ui-shared.js";
+import {
+	resolveDisplayStatus,
+	resolveLastEventAge,
+	formatElapsed,
+	formatTokens,
+	lastMessageSummary,
+	toolActivity,
+} from "./teams-ui-shared.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import { listTasks } from "./task-store.js";
 
@@ -213,7 +220,8 @@ export async function handleTeamStatusCommand(opts: {
 	const displayStatus = resolveDisplayStatus(rpc, memberCfg);
 	const activity = tracker.get(name);
 	const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
-	const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
+	const lastEventAge = resolveLastEventAge(rpc, memberCfg);
+	const noEventFor = lastEventAge === null ? "" : formatElapsed(lastEventAge);
 	const currentTool = toolActivity(activity.currentToolName);
 	const msgPreview = lastMessageSummary(rpc, 120);
 	const allTasks = await listTasks(teamDir, effectiveTlId);

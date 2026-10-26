@@ -35,6 +35,7 @@ import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ActivityTracker } from "./activity-tracker.js";
 import {
 	resolveDisplayStatus,
+	resolveLastEventAge,
 	formatElapsed,
 	lastMessageSummary,
 	formatTokens,
@@ -591,7 +592,8 @@ export function registerTeamsTool(opts: {
 						const displayStatus = resolveDisplayStatus(rpc, memberCfg);
 						const activity = tracker.get(n);
 						const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
-						const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
+						const lastEventAge = resolveLastEventAge(rpc, memberCfg);
+				const noEventFor = lastEventAge === null ? "" : formatElapsed(lastEventAge);
 						const currentTool = toolActivity(activity.currentToolName);
 						const msgPreview = lastMessageSummary(rpc, 80);
 						const model = memberCfg?.meta?.["model"];
@@ -633,7 +635,8 @@ export function registerTeamsTool(opts: {
 				const tracker = getTracker();
 				const activity = tracker.get(name);
 				const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
-				const noEventFor = rpc ? formatElapsed(Date.now() - rpc.lastEventAt) : "";
+				const memberLastEventAge = resolveLastEventAge(rpc, memberCfg);
+				const noEventFor = memberLastEventAge === null ? "" : formatElapsed(memberLastEventAge);
 				const currentTool = toolActivity(activity.currentToolName);
 				const msgPreview = lastMessageSummary(rpc, 120);
 				const allTasks = await listTasks(teamDir, effectiveTlId);
