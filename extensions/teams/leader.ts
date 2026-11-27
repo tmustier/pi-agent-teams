@@ -157,8 +157,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	let refreshTimer: NodeJS.Timeout | null = null;
 	let inboxTimer: NodeJS.Timeout | null = null;
-	let refreshInFlight = false;
-	let inboxInFlight = false;
+	let sessionEpoch = 0;
 	let isStopping = false;
 	let delegateMode = process.env.PI_TEAMS_DELEGATE_MODE === "1";
 	let style: TeamsStyle = getTeamsStyleFromEnv();
@@ -170,6 +169,17 @@ export function runLeader(pi: ExtensionAPI): void {
 		if (inboxTimer) clearInterval(inboxTimer);
 		refreshTimer = null;
 		inboxTimer = null;
+	};
+
+	// Reporting a background failure must never create another rejected promise,
+	// even if Pi has already invalidated the captured extension context.
+	const notifyBestEffort = (message: string, type: "info" | "warning", epoch = sessionEpoch) => {
+		if (epoch !== sessionEpoch) return;
+		try {
+			currentCtx?.ui.notify(message, type);
+		} catch {
+			// The UI may no longer belong to a live session.
+		}
 	};
 
 	const releaseActiveAttachClaim = async (ctx: ExtensionContext): Promise<void> => {
@@ -186,7 +196,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		const nowMs = Date.now();
 		if (nowMs - lastAttachClaimHeartbeatMs < 5_000) return;
 		lastAttachClaimHeartbeatMs = nowMs;
+		const epoch = sessionEpoch;
 		const result = await heartbeatTeamAttachClaim(getTeamDir(currentTeamId), sessionTeamId);
+		if (epoch !== sessionEpoch || !currentCtx) return;
 		if (result === "updated") return;
 
 		const lostTeamId = currentTeamId;
@@ -242,6 +254,8 @@ export function runLeader(pi: ExtensionAPI): void {
 	const seenHookEvents = new Set<string>();
 
 	const enqueueHook = (invocation: TeamsHookInvocation) => {
+		const epoch = sessionEpoch;
+		const notify = (message: string, type: "info" | "warning") => notifyBestEffort(message, type, epoch);
 		const taskId = invocation.completedTask?.id ?? "";
 		const ts = invocation.timestamp ?? "";
 		const key = `${invocation.teamId}:${invocation.event}:${taskId}:${ts}:${invocation.memberName ?? ""}`;
@@ -251,7 +265,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		hookChain = hookChain
 			.then(async () => {
 				// Only run hooks for the currently active team session.
-				if (!currentCtx) return;
+				if (!currentCtx || epoch !== sessionEpoch) return;
 				if (!currentTeamId || currentTeamId !== invocation.teamId) return;
 
 				const res = await runTeamsHook({ invocation, cwd: currentCtx.cwd });
@@ -304,7 +318,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				// Idle hooks are intentionally quiet unless they fail.
 				if (invocation.event === "idle") {
 					if (!ok) {
-						currentCtx.ui.notify(`Hook ${hookName} failed: ${failureSummary}`, "warning");
+						notify(`Hook ${hookName} failed: ${failureSummary}`, "warning");
 					}
 					return;
 				}
@@ -364,16 +378,16 @@ export function runLeader(pi: ExtensionAPI): void {
 
 				if (ok) {
 					const taskRef = task?.id ? ` for task #${task.id}` : "";
-					currentCtx.ui.notify(`Hook ${hookName} passed${taskRef} (${res.durationMs}ms)`, "info");
+					notify(`Hook ${hookName} passed${taskRef} (${res.durationMs}ms)`, "info");
 					return;
 				}
 
 				const failedTaskRef = task?.id ? ` for task #${task.id}` : "";
-				currentCtx.ui.notify(`Hook ${hookName} failed${failedTaskRef}: ${failureSummary}`, "warning");
+				notify(`Hook ${hookName} failed${failedTaskRef}: ${failureSummary}`, "warning");
 				if (taskReopened && task?.id) {
-					currentCtx.ui.notify(`Reopened task #${task.id} due to quality-gate failure`, "warning");
+					notify(`Reopened task #${task.id} due to quality-gate failure`, "warning");
 				} else if (taskReopenSuppressed && shouldReopen && task?.id) {
-					currentCtx.ui.notify(`Auto-reopen suppressed for task #${task.id} (limit ${maxReopens})`, "warning");
+					notify(`Auto-reopen suppressed for task #${task.id} (limit ${maxReopens})`, "warning");
 				}
 
 				let followupTask: TeamTask | null = null;
@@ -442,8 +456,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				}
 			})
 			.catch((err: unknown) => {
-				if (!currentCtx) return;
-				currentCtx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
+				notify(err instanceof Error ? err.message : String(err), "warning");
 			});
 	};
 
@@ -468,19 +481,22 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	const refreshTasks = async () => {
 		if (!currentCtx || !currentTeamId) return;
-		const teamDir = getTeamDir(currentTeamId);
-		const effectiveTaskListId = taskListId ?? currentTeamId;
+		const epoch = sessionEpoch;
+		const teamId = currentTeamId;
+		const teamDir = getTeamDir(teamId);
+		const effectiveTaskListId = taskListId ?? teamId;
 
 		const [nextTasks, cfg] = await Promise.all([listTasks(teamDir, effectiveTaskListId), loadTeamConfig(teamDir)]);
+		if (epoch !== sessionEpoch || !currentCtx || teamId !== currentTeamId) return;
+		const nextConfig = cfg ?? await ensureTeamConfig(teamDir, {
+			teamId,
+			taskListId: effectiveTaskListId,
+			leadName: "team-lead",
+			style,
+		});
+		if (epoch !== sessionEpoch || !currentCtx || teamId !== currentTeamId) return;
 		tasks = nextTasks;
-		teamConfig =
-			cfg ??
-			(await ensureTeamConfig(teamDir, {
-				teamId: currentTeamId,
-				taskListId: effectiveTaskListId,
-				leadName: "team-lead",
-				style,
-			}));
+		teamConfig = nextConfig;
 		style = teamConfig.style ?? style;
 
 		// Auto-done hint (fire once per "all done" state transition)
@@ -698,6 +714,7 @@ export function runLeader(pi: ExtensionAPI): void {
 
 	const pollLeaderInbox = async () => {
 		if (!currentCtx || !currentTeamId) return;
+		const epoch = sessionEpoch;
 		const teamDir = getTeamDir(currentTeamId);
 		const effectiveTaskListId = taskListId ?? currentTeamId;
 		await pollLeaderInboxImpl({
@@ -711,6 +728,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			enqueueHook,
 			hooksEnabled: areTeamsHooksEnabled(process.env),
 			sendLeaderLlmMessage: (content, options) => {
+				if (epoch !== sessionEpoch || !currentCtx) return;
 				pi.sendUserMessage(content, options);
 			},
 			delegationTracker,
@@ -726,6 +744,8 @@ export function runLeader(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		stopLoops();
+		const epoch = ++sessionEpoch;
 		currentCtx = ctx;
 		currentTeamId = currentCtx.sessionManager.getSessionId();
 		inheritedParentTeamId = getParentSessionId(currentCtx.sessionManager);
@@ -755,17 +775,23 @@ export function runLeader(pi: ExtensionAPI): void {
 		});
 
 		await refreshTasks();
+		if (epoch !== sessionEpoch || !currentCtx) return;
 		renderWidget();
 
-		stopLoops();
+		let refreshInFlight = false;
+		let inboxInFlight = false;
 		refreshTimer = setInterval(async () => {
-			if (isStopping) return;
+			if (isStopping || epoch !== sessionEpoch || !currentCtx) return;
 			if (refreshInFlight) return;
 			refreshInFlight = true;
 			try {
 				await heartbeatActiveAttachClaim(ctx);
+				if (epoch !== sessionEpoch || !currentCtx) return;
 				await refreshTasks();
+				if (epoch !== sessionEpoch || !currentCtx) return;
 				renderWidget();
+			} catch (err) {
+				notifyBestEffort(err instanceof Error ? err.message : String(err), "warning", epoch);
 			} finally {
 				refreshInFlight = false;
 			}
@@ -774,11 +800,13 @@ export function runLeader(pi: ExtensionAPI): void {
 		refreshTimer.unref?.();
 
 		inboxTimer = setInterval(async () => {
-			if (isStopping) return;
+			if (isStopping || epoch !== sessionEpoch || !currentCtx) return;
 			if (inboxInFlight) return;
 			inboxInFlight = true;
 			try {
 				await pollLeaderInbox();
+			} catch (err) {
+				notifyBestEffort(err instanceof Error ? err.message : String(err), "warning", epoch);
 			} finally {
 				inboxInFlight = false;
 			}
@@ -788,20 +816,28 @@ export function runLeader(pi: ExtensionAPI): void {
 
 
 	pi.on("session_shutdown", async () => {
-		if (!currentCtx) return;
-		await releaseActiveAttachClaim(currentCtx);
+		// Invalidate in-flight callbacks before any cleanup can yield or fail.
 		stopLoops();
+		sessionEpoch++;
+		const ctx = currentCtx;
+		currentCtx = null;
+		if (!ctx) return;
+		try {
+			await releaseActiveAttachClaim(ctx);
+		} catch {
+			// Best-effort: a failed claim release must not skip teammate cleanup.
+		}
 		const hadTeammates = teammates.size > 0;
 		const strings = getTeamsStrings(style);
-		await stopAllTeammates(currentCtx, `The ${strings.teamNoun} is over`);
+		await stopAllTeammates(ctx, `The ${strings.teamNoun} is over`);
 
 		// Clean up worktrees + branches for this team session so they don't accumulate on disk.
 		// Only clean up teams this session owns — never attached teams.
-		const sessionId = currentCtx.sessionManager.getSessionId();
+		const sessionId = ctx.sessionManager.getSessionId();
 		if (currentTeamId && currentTeamId === sessionId) {
 			const teamDir = getTeamDir(currentTeamId);
 			try {
-				await cleanupWorktrees({ teamDir, teamId: currentTeamId, repoCwd: currentCtx.cwd });
+				await cleanupWorktrees({ teamDir, teamId: currentTeamId, repoCwd: ctx.cwd });
 			} catch {
 				// Best-effort — don't block shutdown.
 			}

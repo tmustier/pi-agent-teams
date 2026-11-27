@@ -35,6 +35,11 @@ jobs:
       - name: Smoke test
         run: npm run smoke-test
 
+      - name: Runtime regression tests (offline Pi SDK)
+        run: |
+          npm run leader-lifecycle-test
+          npm run worker-delivery-test
+
       - name: Package (dry run)
         run: npm pack --dry-run
 

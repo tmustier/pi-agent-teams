@@ -323,7 +323,7 @@ export function runWorker(pi: ExtensionAPI): void {
 						planApproved = true;
 						planMode = false;
 						planRequestId = null;
-						pi.sendUserMessage("Your plan has been approved. Proceed with implementation.");
+						pi.sendUserMessage("Your plan has been approved. Proceed with implementation.", { deliverAs: "followUp" });
 						continue;
 					}
 
@@ -332,6 +332,7 @@ export function runWorker(pi: ExtensionAPI): void {
 						planRequestId = null;
 						pi.sendUserMessage(
 							`Your plan was rejected. Feedback: ${planRejection.feedback}\nPlease revise your plan.`,
+							{ deliverAs: "followUp" },
 						);
 						continue;
 					}
@@ -391,7 +392,7 @@ export function runWorker(pi: ExtensionAPI): void {
 
 				currentTaskId = taskId;
 				isStreaming = true; // optimistic; agent_start will follow
-				pi.sendUserMessage(buildTaskPrompt(style, agentName, task, planMode && !planApproved));
+				pi.sendUserMessage(buildTaskPrompt(style, agentName, task, planMode && !planApproved), { deliverAs: "followUp" });
 				pendingTaskAssignments = [...requeue, ...pendingTaskAssignments];
 				return;
 			}
@@ -405,7 +406,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				pi.sendUserMessage([
 					{ type: "text", text: "You have received comrade message(s):" },
 					{ type: "text", text },
-				]);
+				], { deliverAs: "followUp" });
 				return;
 			}
 
@@ -419,7 +420,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				if (claimed) {
 					currentTaskId = claimed.id;
 					isStreaming = true;
-					pi.sendUserMessage(buildTaskPrompt(style, agentName, claimed, planMode && !planApproved));
+					pi.sendUserMessage(buildTaskPrompt(style, agentName, claimed, planMode && !planApproved), { deliverAs: "followUp" });
 					return;
 				}
 			}
