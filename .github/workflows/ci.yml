@@ -40,6 +40,9 @@ jobs:
           npm run leader-lifecycle-test
           npm run worker-delivery-test
 
+      - name: Atomic write regression test
+        run: npm run atomic-write-test
+
       - name: Package (dry run)
         run: npm pack --dry-run
 

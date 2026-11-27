@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { writeJsonAtomic } from "./atomic-write.js";
 import { withLock } from "./fs-lock.js";
 
 export const TEAM_ATTACH_CLAIM_FILE = ".attach-claim.json";
@@ -57,10 +58,7 @@ async function readClaimUnchecked(teamDir: string): Promise<TeamAttachClaim | nu
 
 async function writeClaimAtomic(teamDir: string, claim: TeamAttachClaim): Promise<void> {
 	const file = getClaimPath(teamDir);
-	await fs.promises.mkdir(teamDir, { recursive: true });
-	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
-	await fs.promises.writeFile(tmp, JSON.stringify(claim, null, 2) + "\n", "utf8");
-	await fs.promises.rename(tmp, file);
+	await writeJsonAtomic(file, claim);
 }
 
 export function assessAttachClaimFreshness(claim: TeamAttachClaim, nowMs = Date.now(), staleMs = TEAM_ATTACH_CLAIM_STALE_MS): {
